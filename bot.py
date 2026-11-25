@@ -39,18 +39,17 @@ ARABIC_FONT_URL = (
 ARABIC_FONT_LOCAL_PATH = "/tmp/Amiri-Regular.ttf"
 
 MEDICAL_HIGH_YIELD_SYSTEM_PROMPT = """
-أنت مساعد أكاديمي متخصص في مساعدة طلاب كلية الطب على المذاكرة بكفاءة عالية.
-القاعدة الذهبية: ركّز بنسبة كبيرة جدًا على الأجزاء المهمة و"موضع السؤال" (High-Yield) في الامتحانات الطبية:
-- المفاهيم الأساسية والميكانيزمات (Mechanisms / Pathophysiology).
-- الحالات الكلينيكية المميزة (Classic clinical vignettes)، الأعراض والعلامات الفارقة.
-- الفروق التشخيصية والمقارنات الحاسمة (Key comparisons / Differential points).
-- الاستثناءات المهمة، المضاعفات الشائعة، أو النقاط المحورية في المحاضرة.
-تجنب تمامًا الأسئلة أو النقاط التافهة أو التفاصيل الهامشية غير الجوهرية.
-اكتب بأسلوب طبي واضح، منظم، ومباشر لتوفير وقت الطالب.
+You are a high-yield medical exam tutor helping a medical student study efficiently for English medical exams.
+Golden Rule: Focus heavily on high-yield exam topics ("what gets tested"):
+- Core mechanisms, pharmacology/pathophysiology principles, and key clinical concepts.
+- Classic clinical vignettes, distinguishing presentations, and high-yield indications/contraindications/adverse effects.
+- Crucial comparisons, differential points, and critical exceptions.
+Strictly avoid trivial facts or low-yield filler details.
+Write ALL medical content, questions, choices, answers, summaries, explanations, and Anki cards strictly in clear, concise, exam-oriented English.
 """
 
 
-def get_arabic_font_path() -> str | None:
+def get_font_path() -> str | None:
     if os.path.exists(ARABIC_FONT_LOCAL_PATH) and os.path.getsize(ARABIC_FONT_LOCAL_PATH) > 10000:
         return ARABIC_FONT_LOCAL_PATH
     try:
@@ -60,7 +59,7 @@ def get_arabic_font_path() -> str | None:
                 f.write(resp.content)
             return ARABIC_FONT_LOCAL_PATH
     except Exception as e:
-        logger.warning("Could not download Arabic font: %s", e)
+        logger.warning("Could not download font: %s", e)
     return None
 
 
@@ -69,17 +68,17 @@ def generate_mcq_pdf_bytes(lecture_title: str, mcq_items: list[dict]) -> bytes:
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
-    font_path = get_arabic_font_path()
+    font_path = get_font_path()
     if font_path:
-        pdf.add_font("ArabicFont", "", font_path)
-        pdf.set_font("ArabicFont", size=15)
+        pdf.add_font("UniFont", "", font_path)
+        pdf.set_font("UniFont", size=14)
     else:
         pdf.set_font("Helvetica", size=14)
 
     pdf.cell(0, 10, text=f"High-Yield MCQ ({len(mcq_items)} Questions) - {lecture_title}", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
 
-    pdf.set_font("ArabicFont" if font_path else "Helvetica", size=11)
+    pdf.set_font("UniFont" if font_path else "Helvetica", size=11)
 
     for idx, item in enumerate(mcq_items, start=1):
         question_text = str(item.get("question", "")).strip()
@@ -125,7 +124,7 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
                 remaining = MAX_CHARS - current_len
                 if remaining > 200:
                     extracted_parts.append(part[:remaining])
-                extracted_parts.append("\n[تم الاقتطاع للحفاظ على الأهم والتركيز]")
+                extracted_parts.append("\n[Truncated to keep focus on high-yield content]")
                 break
             extracted_parts.append(part)
             current_len += len(part)
@@ -134,30 +133,30 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
 
 def build_mcq_json_prompt(lecture_text: str) -> str:
     return f"""
-أنشئ أسئلة اختيار من متعدد (MCQ) عالية الأهمية (High-Yield) من هذه المحاضرة الطبية.
-الالتزام الصارم بعدد الأسئلة:
-- الحد الأدنى هو 30 سؤالًا ولا يقل العدد عن 30 سؤالًا بأي حال.
-- الحد الأقصى مفتوح حسب طول وغنى محتوى المحاضرة (إذا كانت المحاضرة غنية وطويلة زد العدد عن 30 سؤالًا لتغطية كل النقاط المهمة ومواضع الأسئلة).
-- اجعل معظم الأسئلة مبنية على سيناريوهات/حالات قصيرة أو مواقف تطبيقية وفهمية وليست مجرد حفظ حرفي.
-- ركّز على الأجزاء المهمة وموضع السؤال وتجنب الأسئلة التافهة أو الهامشية.
-- كل سؤال يحتوي على 4 اختيارات فقط (قائمة من 4 نصوص، كل اختيار لا يتجاوز 85 حرفًا ليتناسب مع استفتاءات تيليجرام).
-- نص السؤال لا يتجاوز 260 حرفًا.
-- حدد رقم الإجابة الصحيحة (من 0 إلى 3) في `correct_option_id`.
-- أضف شرحًا مختصرًا ودقيقًا في `explanation`.
+Generate high-yield English medical Multiple Choice Questions (MCQs) from this lecture.
+Strict count rules:
+- Minimum is 30 questions; NEVER output fewer than 30 questions.
+- Maximum is open-ended depending on how rich and long the lecture is (generate more than 30 when the lecture covers substantial high-yield material).
+- Write ALL questions, options, and explanations strictly in English.
+- Prioritize clinical vignettes, mechanisms, key distinctions, contraindications, adverse effects, and classic exam traps; avoid trivial details.
+- Each question must have exactly 4 options (list of 4 concise strings, each <= 85 characters for Telegram polls).
+- Question stem must be <= 260 characters.
+- Set `correct_option_id` as an integer from 0 to 3.
+- Include a concise, high-yield `explanation` in English.
 
-أرجع النتيجة بصيغة JSON صالحة بهذا الشكل:
+Return valid JSON only in this exact structure:
 {{
   "questions": [
     {{
-      "question": "نص السؤال أو الحالة",
-      "options": ["اختيار 1", "اختيار 2", "اختيار 3", "اختيار 4"],
+      "question": "Concise English clinical vignette or high-yield question",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
       "correct_option_id": 0,
-      "explanation": "شرح مختصر لسبب الصحة واستبعاد البدائل المهمة"
+      "explanation": "Brief high-yield explanation in English"
     }}
   ]
 }}
 
-محتوى المحاضرة:
+Lecture content:
 \"\"\"
 {lecture_text}
 \"\"\"
@@ -167,38 +166,34 @@ def build_mcq_json_prompt(lecture_text: str) -> str:
 def build_mode_prompt(mode: str, lecture_text: str) -> str:
     if mode == "saq":
         task_instruction = """
-أنشئ أسئلة مقالية قصيرة (SAQ) مركزة على أهم نقاط المحاضرة ومواضع الامتحان.
-- اجعل الأسئلة واضحة ومحددة (آلية حدوث، مقارنة، تفسير حالة، أو نقاط رئيسية).
-- بعد كل سؤال اكتب نموذج إجابة مختصر ومنظم في نقاط (Bullet points) يسهل استرجاعه في الامتحان.
+Generate high-yield Short Answer Questions (SAQs) in English based on the most testable points in this lecture.
+- Focus on mechanisms, comparisons, clinical reasoning, and key distinctions.
+- Provide a concise, bulleted model answer in English right after each question.
 """
     elif mode == "mix":
         task_instruction = """
-أنشئ مزيجًا مركّزًا (Mix) من أسئلة MCQ (حالات/مواضع سؤال) وأسئلة SAQ قصيرة من أهم أجزاء المحاضرة.
-- ركّز فقط على النقاط التي تتكرر في الامتحانات وتفرّق بين الطلاب.
-- ضع الإجابات والتفسيرات المختصرة بوضوح.
+Generate a focused high-yield Mix of English MCQs (vignettes/exam traps) and concise English SAQs from the most testable parts of this lecture.
+- Include clear answers and brief high-yield explanations in English.
 """
     elif mode == "summary":
         task_instruction = """
-لخّص المحاضرة بأسلوب High-Yield طبي مركز ومناسب للمراجعة السريعة قبل الامتحان.
-- قسّم الملخص إلى عناوين واضحة.
-- أبرز الفروق المهمة، الاستثناءات، والربط بين المعلومة وأهميتها الإكلينيكية أو الامتحانية.
-- احذف الحشو والكلام المكرر.
+Create a high-yield English medical exam review summary of this lecture.
+- Organize with clear headings and bullet points.
+- Highlight key mechanisms, comparisons, exceptions, and clinical/exam correlations. Remove fluff.
 """
     elif mode == "anki":
         task_instruction = """
-أنشئ بطاقات Anki جاهزة للاستيراد المباشر بصيغة نصية مفصولة بعلامة الأنابيب ( | ) فقط، سطر واحد لكل بطاقة بدون ترقيم أو مقدمات أو شرح خارج البطاقات.
-الصيغة المطلوبة لكل سطر:
-السؤال أو الحالة أو النقطة المهمة | الإجابة المختصرة الدقيقة + نقطة تمييز سريعة
-مثال:
-ما الميكانيزم الأساسي لـ ... وكيف يظهر سريريًا؟ | يحدث بسبب ... ويتميز بـ ... (موضع سؤال شائع)
-ركّز فقط على أهم نقاط المحاضرة ومواضع الأسئلة.
+Create Anki flashcards in English ready for direct import using pipe ( | ) separation ONLY, one card per line, with NO numbering, intro, or extra commentary.
+Format per line:
+Question or clinical vignette in English | Concise high-yield answer + key differentiator in English
+Focus strictly on high-yield exam points.
 """
     else:
-        task_instruction = "لخّص أهم نقاط المحاضرة بأسلوب طبي مركز."
+        task_instruction = "Summarize the high-yield exam points of this lecture in English."
 
     return f"""{task_instruction}
 
-محتوى المحاضرة:
+Lecture content:
 \"\"\"
 {lecture_text}
 \"\"\"
@@ -228,14 +223,14 @@ def get_choices_keyboard(has_mcq_pdf: bool = False) -> InlineKeyboardMarkup:
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     welcome_text = (
-        "أهلًا بك في بوت مذاكرة الطب (High-Yield)\n\n"
+        "أهلًا بك في بوت مذاكرة الطب (High-Yield - English Exams)\n\n"
         "1. أرسل لي ملف المحاضرة بصيغة **PDF**.\n"
-        "2. سأحلل الملف وأعرض لك أزرار اختيار:\n"
+        "2. سأحلل الملف وأعرض لك أزرار اختيار (كل الأسئلة والملخصات والـ Anki بالإنجليزية):\n"
         "   • **MCQ Poll** (أسئلة تفاعلية كـ Poll بحد أدنى 30 سؤال + إمكانية تحميلها PDF مع الشرح)\n"
-        "   • **SAQ** (أسئلة قصيرة بإجابات نموذجية)\n"
-        "   • **Mix** (مزيج MCQ + SAQ)\n"
-        "   • **Summary** (ملخص High-Yield سريع)\n"
-        "   • **Anki Ready (.txt)** (ملف جاهز للاستيراد المباشر في Anki)\n\n"
+        "   • **SAQ** (أسئلة قصيرة بالإنجليزية مع إجابات نموذجية)\n"
+        "   • **Mix** (مزيج MCQ + SAQ بالإنجليزية)\n"
+        "   • **Summary** (ملخص High-Yield بالإنجليزية)\n"
+        "   • **Anki Ready (.txt)** (ملف جاهز للاستيراد المباشر في Anki بالإنجليزية)\n\n"
         "التركيز الأساسي دائمًا على الأجزاء المهمة وموضع السؤال لتوفير وقتك."
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
@@ -341,7 +336,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.message.reply_document(
                 document=pdf_io,
                 filename=f"{lecture_title}_MCQ.pdf",
-                caption=f"ملف PDF يضم {len(mcq_items)} سؤال MCQ مع الإجابات والشرح.",
+                caption=f"High-Yield MCQ PDF ({len(mcq_items)} questions with answers & explanations).",
                 reply_markup=get_choices_keyboard(has_mcq_pdf=True),
             )
         except Exception as e:
@@ -355,7 +350,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     mode = action.replace("mode_", "")
-    wait_msg = await query.message.reply_text("جاري إعداد المحتوى الطبي المركز (High-Yield)...")
+    wait_msg = await query.message.reply_text("جاري إعداد المحتوى الطبي المركز (High-Yield English)...")
 
     try:
         if mode == "mcq":
@@ -378,7 +373,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 return
 
             context.user_data["last_mcq_items"] = mcq_items
-            await wait_msg.edit_text(f"تم توليد {len(mcq_items)} سؤال MCQ. جاري إرسال الاستفتاءات...")
+            await wait_msg.edit_text(f"تم توليد {len(mcq_items)} سؤال MCQ بالإنجليزية. جاري إرسال الاستفتاءات...")
 
             for idx, item in enumerate(mcq_items, start=1):
                 await query.message.reply_poll(
@@ -391,7 +386,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await asyncio.sleep(0.15)
 
             await query.message.reply_text(
-                f"تم إرسال {len(mcq_items)} سؤال كـ Poll. الشرح التفصيلي لكل سؤال موجود داخل ملف الـ PDF.\n"
+                f"تم إرسال {len(mcq_items)} سؤال كـ Poll بالإنجليزية. الشرح التفصيلي لكل سؤال موجود داخل ملف الـ PDF.\n"
                 "تحب تحمّل الأسئلة دي كملف PDF أو تختار حاجة تانية من نفس المحاضرة؟",
                 reply_markup=get_choices_keyboard(has_mcq_pdf=True),
             )
@@ -432,7 +427,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.message.reply_document(
                 document=anki_bytes,
                 filename=f"{lecture_title}_anki.txt",
-                caption="ملف Anki جاهز للاستيراد المباشر (Separator: |). تحب تعمل حاجة تانية من نفس المحاضرة؟",
+                caption="Anki deck ready for direct import (Separator: |). تحب تعمل حاجة تانية من نفس المحاضرة؟",
                 reply_markup=get_choices_keyboard(has_mcq_pdf=has_pdf),
             )
         else:
