@@ -30,7 +30,9 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-MAX_CHARS = 35000
+MODEL_NAME = "gemini-3.8-flash"
+MAX_CHARS = 45000
+
 ARABIC_FONT_URL = (
     "https://github.com/google/fonts/raw/main/ofl/amiri/Amiri-Regular.ttf"
 )
@@ -74,7 +76,7 @@ def generate_mcq_pdf_bytes(lecture_title: str, mcq_items: list[dict]) -> bytes:
     else:
         pdf.set_font("Helvetica", size=14)
 
-    pdf.cell(0, 10, text=f"High-Yield MCQ - {lecture_title}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 10, text=f"High-Yield MCQ ({len(mcq_items)} Questions) - {lecture_title}", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
 
     pdf.set_font("ArabicFont" if font_path else "Helvetica", size=11)
@@ -114,27 +116,36 @@ def generate_mcq_pdf_bytes(lecture_title: str, mcq_items: list[dict]) -> bytes:
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     reader = PdfReader(io.BytesIO(pdf_bytes))
     extracted_parts = []
+    current_len = 0
     for idx, page in enumerate(reader.pages, start=1):
-        text = page.extract_text() or ""
-        text = text.strip()
+        text = (page.extract_text() or "").strip()
         if text:
-            extracted_parts.append(f"--- Page {idx} ---\n{text}")
-    full_text = "\n\n".join(extracted_parts)
-    if len(full_text) > MAX_CHARS:
-        full_text = full_text[:MAX_CHARS] + "\n\n[تم الاقتطاع للحفاظ على الأهم والتركيز]"
-    return full_text
+            part = f"--- Page {idx} ---\n{text}"
+            if current_len + len(part) > MAX_CHARS:
+                remaining = MAX_CHARS - current_len
+                if remaining > 200:
+                    extracted_parts.append(part[:remaining])
+                extracted_parts.append("\n[تم الاقتطاع للحفاظ على الأهم والتركيز]")
+                break
+            extracted_parts.append(part)
+            current_len += len(part)
+    return "\n\n".join(extracted_parts)
 
 
 def build_mcq_json_prompt(lecture_text: str) -> str:
     return f"""
-أنشئ 6 إلى 10 أسئلة اختيار من متعدد (MCQ) عالية الأهمية (High-Yield) من هذه المحاضرة الطبية.
+أنشئ أسئلة اختيار من متعدد (MCQ) عالية الأهمية (High-Yield) من هذه المحاضرة الطبية.
+الالتزام الصارم بعدد الأسئلة:
+- الحد الأدنى هو 30 سؤالًا ولا يقل العدد عن 30 سؤالًا بأي حال.
+- الحد الأقصى مفتوح حسب طول وغنى محتوى المحاضرة (إذا كانت المحاضرة غنية وطويلة زد العدد عن 30 سؤالًا لتغطية كل النقاط المهمة ومواضع الأسئلة).
 - اجعل معظم الأسئلة مبنية على سيناريوهات/حالات قصيرة أو مواقف تطبيقية وفهمية وليست مجرد حفظ حرفي.
-- كل سؤال يحتوي على 4 اختيارات فقط (قائمة من 4 نصوص، كل اختيار لا يتجاوز 90 حرفًا ليتناسب مع استفتاءات تيليجرام).
-- نص السؤال لا يتجاوز 280 حرفًا.
+- ركّز على الأجزاء المهمة وموضع السؤال وتجنب الأسئلة التافهة أو الهامشية.
+- كل سؤال يحتوي على 4 اختيارات فقط (قائمة من 4 نصوص، كل اختيار لا يتجاوز 85 حرفًا ليتناسب مع استفتاءات تيليجرام).
+- نص السؤال لا يتجاوز 260 حرفًا.
 - حدد رقم الإجابة الصحيحة (من 0 إلى 3) في `correct_option_id`.
 - أضف شرحًا مختصرًا ودقيقًا في `explanation`.
 
-أرجع النتيجة بصيغة JSON صالحة فقط بدون أي نص إضافي أو علامات ```json بهذا الشكل:
+أرجع النتيجة بصيغة JSON صالحة بهذا الشكل:
 {{
   "questions": [
     {{
@@ -220,7 +231,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "أهلًا بك في بوت مذاكرة الطب (High-Yield)\n\n"
         "1. أرسل لي ملف المحاضرة بصيغة **PDF**.\n"
         "2. سأحلل الملف وأعرض لك أزرار اختيار:\n"
-        "   • **MCQ Poll** (أسئلة تفاعلية كـ Poll + شرح + إمكانية تحميلها PDF)\n"
+        "   • **MCQ Poll** (أسئلة تفاعلية كـ Poll بحد أدنى 30 سؤال + إمكانية تحميلها PDF مع الشرح)\n"
         "   • **SAQ** (أسئلة قصيرة بإجابات نموذجية)\n"
         "   • **Mix** (مزيج MCQ + SAQ)\n"
         "   • **Summary** (ملخص High-Yield سريع)\n"
@@ -245,7 +256,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         tg_file = await document.get_file()
         pdf_bytes = bytes(await tg_file.download_as_bytearray())
-        lecture_text = extract_text_from_pdf(pdf_bytes)
+        lecture_text = await asyncio.to_thread(extract_text_from_pdf, pdf_bytes)
+        del pdf_bytes
 
         if not lecture_text.strip():
             await status_msg.edit_text(
@@ -254,7 +266,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
         context.user_data["lecture_text"] = lecture_text
-        context.user_data["lecture_title"] = os.path.splitext(file_name)[0]
+        context.user_data["lecture_title"] = os.path.splitext(file_name)[0][:40]
         context.user_data.pop("last_mcq_items", None)
 
         await status_msg.edit_text(
@@ -265,7 +277,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
     except Exception as e:
         logger.error("Error handling document: %s", e)
-        await status_msg.edit_text("حدث خطأ أثناء قراءة الملف. حاول مرة أخرى.")
+        await status_msg.edit_text(f"حدث خطأ أثناء قراءة الملف: {type(e).__name__}")
 
 
 async def send_long_text(chat, text: str) -> None:
@@ -290,8 +302,8 @@ def parse_mcq_json(raw_text: str) -> list[dict]:
     for item in items:
         if not isinstance(item, dict):
             continue
-        q = str(item.get("question", "")).strip()[:295]
-        opts = [str(o).strip()[:95] for o in (item.get("options") or []) if str(o).strip()][:10]
+        q = str(item.get("question", "")).strip()[:280]
+        opts = [str(o).strip()[:90] for o in (item.get("options") or []) if str(o).strip()][:10]
         correct_id = item.get("correct_option_id", 0)
         exp = str(item.get("explanation", "")).strip()
 
@@ -314,14 +326,13 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
     action = query.data
     lecture_title = context.user_data.get("lecture_title", "lecture")
 
-    # تصدير آخر أسئلة MCQ تم توليدها إلى ملف PDF
     if action == "export_mcq_pdf":
         mcq_items = context.user_data.get("last_mcq_items")
         if not mcq_items:
             await query.message.reply_text("لا توجد أسئلة MCQ محفوظة حاليًا. اضغط على MCQ Poll أولًا.")
             return
 
-        pdf_wait = await query.message.reply_text("جاري تجهيز ملف الـ PDF للأسئلة...")
+        pdf_wait = await query.message.reply_text("جاري تجهيز ملف الـ PDF للأسئلة والإجابات والشرح...")
         try:
             pdf_bytes = await asyncio.to_thread(generate_mcq_pdf_bytes, lecture_title, mcq_items)
             pdf_io = io.BytesIO(pdf_bytes)
@@ -330,12 +341,12 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.message.reply_document(
                 document=pdf_io,
                 filename=f"{lecture_title}_MCQ.pdf",
-                caption="ملف PDF بأسئلة الـ MCQ والإجابات والشرح.",
+                caption=f"ملف PDF يضم {len(mcq_items)} سؤال MCQ مع الإجابات والشرح.",
                 reply_markup=get_choices_keyboard(has_mcq_pdf=True),
             )
         except Exception as e:
             logger.error("Error generating MCQ PDF: %s", e)
-            await pdf_wait.edit_text("حدث خطأ أثناء إنشاء ملف الـ PDF.")
+            await pdf_wait.edit_text(f"حدث خطأ أثناء إنشاء ملف الـ PDF: {type(e).__name__}")
         return
 
     lecture_text = context.user_data.get("lecture_text")
@@ -349,12 +360,14 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         if mode == "mcq":
             prompt = build_mcq_json_prompt(lecture_text)
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=MODEL_NAME,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=MEDICAL_HIGH_YIELD_SYSTEM_PROMPT,
                     temperature=0.3,
+                    response_mime_type="application/json",
                 ),
             )
             raw_out = response.text or ""
@@ -365,7 +378,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 return
 
             context.user_data["last_mcq_items"] = mcq_items
-            await wait_msg.delete()
+            await wait_msg.edit_text(f"تم توليد {len(mcq_items)} سؤال MCQ. جاري إرسال الاستفتاءات...")
 
             for idx, item in enumerate(mcq_items, start=1):
                 await query.message.reply_poll(
@@ -375,18 +388,19 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                     correct_option_id=item["correct_option_id"],
                     is_anonymous=False,
                 )
-                if item["explanation"]:
-                    await query.message.reply_text(f"💡 شرح سؤال {idx}: {item['explanation']}")
+                await asyncio.sleep(0.15)
 
             await query.message.reply_text(
+                f"تم إرسال {len(mcq_items)} سؤال كـ Poll. الشرح التفصيلي لكل سؤال موجود داخل ملف الـ PDF.\n"
                 "تحب تحمّل الأسئلة دي كملف PDF أو تختار حاجة تانية من نفس المحاضرة؟",
                 reply_markup=get_choices_keyboard(has_mcq_pdf=True),
             )
             return
 
         prompt = build_mode_prompt(mode, lecture_text)
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=MODEL_NAME,
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=MEDICAL_HIGH_YIELD_SYSTEM_PROMPT,
@@ -430,7 +444,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     except Exception as e:
         logger.error("Error generating content: %s", e)
-        await wait_msg.edit_text("حدث خطأ أثناء التوليد. حاول مرة أخرى بعد قليل.")
+        await wait_msg.edit_text(f"حدث خطأ أثناء التوليد ({type(e).__name__}). حاول مرة أخرى بعد قليل.")
 
 
 def main() -> None:
