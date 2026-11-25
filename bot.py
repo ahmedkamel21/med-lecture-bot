@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import os
+import re
 import tempfile
 from fpdf import FPDF
 from google import genai
@@ -33,10 +34,10 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_NAME = "gemini-3.8-flash"
 MAX_CHARS = 45000
 
-ARABIC_FONT_URL = (
+FONT_URL = (
     "https://github.com/google/fonts/raw/main/ofl/amiri/Amiri-Regular.ttf"
 )
-ARABIC_FONT_LOCAL_PATH = "/tmp/Amiri-Regular.ttf"
+FONT_LOCAL_PATH = "/tmp/Amiri-Regular.ttf"
 
 MEDICAL_HIGH_YIELD_SYSTEM_PROMPT = """
 You are a high-yield medical exam tutor helping a medical student study efficiently for English medical exams.
@@ -49,56 +50,118 @@ Write ALL medical content, questions, choices, answers, summaries, explanations,
 """
 
 
+def sanitize_pdf_text(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    # تقسيم أي كلمة متصلة طويلة جدًا (أكثر من 40 حرفًا) حتى لا تسبب مشكلة في التفاف السطر
+    words = []
+    for word in cleaned.split(" "):
+        if len(word) > 40:
+            chunks = [word[i : i + 35] for i in range(0, len(word), 35)]
+            words.extend(chunks)
+        else:
+            words.append(word)
+    return " ".join(words)
+
+
 def get_font_path() -> str | None:
-    if os.path.exists(ARABIC_FONT_LOCAL_PATH) and os.path.getsize(ARABIC_FONT_LOCAL_PATH) > 10000:
-        return ARABIC_FONT_LOCAL_PATH
+    if os.path.exists(FONT_LOCAL_PATH) and os.path.getsize(FONT_LOCAL_PATH) > 10000:
+        return FONT_LOCAL_PATH
     try:
-        resp = requests.get(ARABIC_FONT_URL, timeout=20)
+        resp = requests.get(FONT_URL, timeout=20)
         if resp.status_code == 200 and len(resp.content) > 10000:
-            with open(ARABIC_FONT_LOCAL_PATH, "wb") as f:
+            with open(FONT_LOCAL_PATH, "wb") as f:
                 f.write(resp.content)
-            return ARABIC_FONT_LOCAL_PATH
+            return FONT_LOCAL_PATH
     except Exception as e:
         logger.warning("Could not download font: %s", e)
     return None
 
 
 def generate_mcq_pdf_bytes(lecture_title: str, mcq_items: list[dict]) -> bytes:
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_margins(left=12, top=12, right=12)
+    pdf.set_auto_page_break(auto=True, margin=12)
     pdf.add_page()
 
+    usable_width = pdf.w - pdf.l_margin - pdf.r_margin
     font_path = get_font_path()
+    font_family = "Helvetica"
+
     if font_path:
-        pdf.add_font("UniFont", "", font_path)
-        pdf.set_font("UniFont", size=14)
-    else:
-        pdf.set_font("Helvetica", size=14)
+        try:
+            pdf.add_font("UniFont", "", font_path)
+            font_family = "UniFont"
+        except Exception as e:
+            logger.warning("Failed adding custom font, fallback to Helvetica: %s", e)
+            font_family = "Helvetica"
 
-    pdf.cell(0, 10, text=f"High-Yield MCQ ({len(mcq_items)} Questions) - {lecture_title}", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(4)
+    def write_line_block(txt: str, font_size: int, line_h: float, space_after: float = 1.5) -> None:
+        safe_txt = sanitize_pdf_text(txt)
+        if not safe_txt:
+            return
+        if font_family == "Helvetica":
+            safe_txt = safe_txt.encode("latin-1", errors="replace").decode("latin-1")
+        pdf.set_x(pdf.l_margin)
+        pdf.set_font(font_family, size=font_size)
+        pdf.multi_cell(usable_width, line_h, text=safe_txt)
+        if space_after > 0:
+            pdf.ln(space_after)
 
-    pdf.set_font("UniFont" if font_path else "Helvetica", size=11)
+    safe_title = sanitize_pdf_text(lecture_title) or "Lecture"
+    write_line_block(
+        f"High-Yield MCQ ({len(mcq_items)} Questions) - {safe_title}",
+        font_size=13,
+        line_h=7,
+        space_after=4,
+    )
 
     for idx, item in enumerate(mcq_items, start=1):
-        question_text = str(item.get("question", "")).strip()
-        options = item.get("options") or []
-        correct_idx = item.get("correct_option_id", 0)
-        explanation = str(item.get("explanation", "")).strip()
+        try:
+            question_text = str(item.get("question", "")).strip()
+            options = item.get("options") or []
+            correct_idx = item.get("correct_option_id", 0)
+            explanation = str(item.get("explanation", "")).strip()
 
-        pdf.multi_cell(0, 7, text=f"Q{idx}: {question_text}")
-        for opt_i, opt_val in enumerate(options):
-            letter = chr(65 + opt_i) if opt_i < 26 else str(opt_i + 1)
-            pdf.multi_cell(0, 6, text=f"   {letter}) {str(opt_val).strip()}")
+            write_line_block(f"Q{idx}: {question_text}", font_size=11, line_h=6, space_after=1)
 
-        correct_letter = chr(65 + correct_idx) if isinstance(correct_idx, int) and 0 <= correct_idx < len(options) else "A"
-        correct_label = options[correct_idx] if isinstance(correct_idx, int) and 0 <= correct_idx < len(options) else ""
-        pdf.multi_cell(0, 6, text=f"Correct Answer: ({correct_letter}) {correct_label}")
+            for opt_i, opt_val in enumerate(options):
+                letter = chr(65 + opt_i) if opt_i < 26 else str(opt_i + 1)
+                write_line_block(
+                    f"   {letter}) {str(opt_val).strip()}",
+                    font_size=10,
+                    line_h=5.5,
+                    space_after=0.5,
+                )
 
-        if explanation:
-            pdf.multi_cell(0, 6, text=f"Explanation: {explanation}")
+            if isinstance(correct_idx, int) and 0 <= correct_idx < len(options):
+                correct_letter = chr(65 + correct_idx) if correct_idx < 26 else str(correct_idx + 1)
+                correct_label = str(options[correct_idx]).strip()
+            else:
+                correct_letter = "A"
+                correct_label = ""
 
-        pdf.ln(4)
+            write_line_block(
+                f"Correct Answer: ({correct_letter}) {correct_label}",
+                font_size=10,
+                line_h=5.5,
+                space_after=1,
+            )
+
+            if explanation:
+                write_line_block(
+                    f"Explanation: {explanation}",
+                    font_size=10,
+                    line_h=5.5,
+                    space_after=3,
+                )
+            else:
+                pdf.ln(2)
+        except Exception as q_err:
+            logger.warning("Skipping malformed question %s in PDF: %s", idx, q_err)
+            continue
 
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp_path = tmp.name
