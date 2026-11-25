@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 import os
@@ -246,6 +247,9 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
         raise ValueError("تأكد من ضبط TELEGRAM_BOT_TOKEN و GEMINI_API_KEY في متغيرات البيئة.")
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
