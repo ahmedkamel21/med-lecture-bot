@@ -34,11 +34,11 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 MODEL_NAME = "gemini-3.8-flash"
 
-# حدود النص: حد أعلى للمحاضرة المفردة وحد متوازن للمحاضرات المجمعة لحماية الرامات (256 MB)
+# حدود النص: حد المحاضرة المفردة ثابت (28000) وتقليل حد المحاضرات المجمعة فقط لتخفيف الضغط
 MAX_LECTURES_PER_SESSION = 8
 MAX_CHARS_SINGLE_LECTURE = 28000
-MAX_CHARS_PER_LECTURE = 7500
-MAX_COMBINED_CHARS = 48000
+MAX_CHARS_PER_LECTURE = 4500
+MAX_COMBINED_CHARS = 36000
 MAX_PREVIOUS_QUESTIONS_CONTEXT = 120
 
 FONT_URL = (
