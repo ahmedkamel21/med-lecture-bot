@@ -522,4 +522,476 @@ def get_choices_keyboard(
         ],
         [
             InlineKeyboardButton("Summary (PDF)", callback_data="mode_summary"),
-            InlineKeyboardButton("An
+            InlineKeyboardButton("Anki Ready (.txt)", callback_data="mode_anki"),
+        ],
+    ]
+    if has_mcq_pdf:
+        keyboard.append(
+            [InlineKeyboardButton("تحميل أسئلة الـ MCQ كملف PDF", callback_data="export_mcq_pdf")]
+        )
+    if has_summary_pdf:
+        keyboard.append(
+            [InlineKeyboardButton("إعادة تحميل الملخص كملف PDF", callback_data="export_summary_pdf")]
+        )
+
+    session_row = []
+    if has_lectures:
+        session_row.append(
+            InlineKeyboardButton("اختيار محاضرة محددة", callback_data="select_lecture")
+        )
+    session_row.append(
+        InlineKeyboardButton("مسح المحاضرات (Clear)", callback_data="clear_lectures")
+    )
+    keyboard.append(session_row)
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def build_lecture_selection_keyboard(
+    lectures: list[dict], active_idx: int | None
+) -> InlineKeyboardMarkup:
+    rows = []
+    for i, lec in enumerate(lectures):
+        title = str(lec.get("title", f"Lecture {i + 1}"))[:28]
+        prefix = "✅ " if active_idx == i else f"{i + 1}. "
+        rows.append(
+            [InlineKeyboardButton(f"{prefix}{title}", callback_data=f"pick_lec_{i}")]
+        )
+
+    all_prefix = "✅ " if active_idx is None else ""
+    rows.append(
+        [InlineKeyboardButton(f"{all_prefix}الكل (مجمّع - {len(lectures)} محاضرات)", callback_data="pick_lec_all")]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton("رجوع للأزرار", callback_data="back_to_menu"),
+            InlineKeyboardButton("مسح المحاضرات (Clear)", callback_data="clear_lectures"),
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
+def get_active_status_text(context: ContextTypes.DEFAULT_TYPE, lectures: list[dict]) -> str:
+    if not lectures:
+        return "الوضع الحالي: لا توجد محاضرات مخزنة."
+    active_idx = get_active_lecture_index(context, lectures)
+    if active_idx is not None:
+        title = lectures[active_idx].get("title", f"Lecture {active_idx + 1}")
+        return f"الوضع الحالي: محاضرة محددة ({active_idx + 1}: {title})"
+    if len(lectures) == 1:
+        return f"الوضع الحالي: محاضرة واحدة ({lectures[0].get('title', 'Lecture')})"
+    return f"الوضع الحالي: مجمّع ({len(lectures)} محاضرات)"
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lectures = get_session_lectures(context)
+    welcome_text = (
+        "أهلًا بك في بوت مذاكرة الطب (High-Yield - English Exams)\n\n"
+        f"1. أرسل ملف محاضرة بصيغة PDF (ويمكنك تجميع حتى {MAX_LECTURES_PER_SESSION} محاضرات في الجلسة).\n"
+        "2. اختر من الأزرار لتوليد محتوى لمحاضرة محددة أو مجمّع على الكل:\n"
+        "   - MCQ Poll (أسئلة تفاعلية كـ Poll بحد أدنى 30 سؤال + إمكانية تحميلها PDF بخط واضح)\n"
+        "   - MCQ Traps & Mix (أسئلة MCQ مليانة فخاخ امتحانات ومتشابهات وتجميعات)\n"
+        "   - SAQ (أسئلة قصيرة بالإنجليزية مع إجابات نموذجية)\n"
+        "   - Mix (مزيج MCQ + SAQ بتنسيق نظيف بدون نجوم)\n"
+        "   - Summary (ملخص High-Yield بتنسيق جميل وملف PDF بخط واضح)\n"
+        "   - Anki Ready (.txt) (ملف جاهز للاستيراد المباشر بفاصل Tab)\n\n"
+        f"{get_active_status_text(context, lectures)}"
+    )
+    await update.message.reply_text(
+        welcome_text,
+        reply_markup=get_choices_keyboard(
+            has_mcq_pdf=bool(context.user_data.get("last_mcq_items")),
+            has_summary_pdf=bool(context.user_data.get("last_summary_pdf_bytes")),
+            has_lectures=bool(lectures),
+        ),
+    )
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    document = update.message.document
+    if not document:
+        return
+
+    file_name = document.file_name or "lecture.pdf"
+    if not file_name.lower().endswith(".pdf"):
+        await update.message.reply_text("من فضلك أرسل ملف المحاضرة بصيغة PDF.")
+        return
+
+    status_msg = await update.message.reply_text("جاري استلام المحاضرة وتحليل محتواها...")
+
+    try:
+        tg_file = await document.get_file()
+        pdf_bytes = bytes(await tg_file.download_as_bytearray())
+        lecture_text = await asyncio.to_thread(extract_text_from_pdf, pdf_bytes)
+        del pdf_bytes
+        gc.collect()
+
+        if not lecture_text.strip():
+            await status_msg.edit_text(
+                "لم أتمكن من استخراج نص واضح من هذا الـ PDF (قد يكون صورًا فقط). جرّب ملف PDF يحتوي على نص."
+            )
+            return
+
+        lectures = get_session_lectures(context)
+        if len(lectures) >= MAX_LECTURES_PER_SESSION:
+            removed = lectures.pop(0)
+            logger.info("Removed oldest lecture %s to stay within limit", removed.get("title"))
+
+        clean_title = os.path.splitext(file_name)[0][:40]
+        lectures.append({"title": clean_title, "text": lecture_text})
+        context.user_data.pop("active_lecture_idx", None)
+        context.user_data.pop("last_mcq_items", None)
+        context.user_data.pop("last_summary_pdf_bytes", None)
+
+        await status_msg.edit_text(
+            f"تمت إضافة المحاضرة: {clean_title}\n"
+            f"إجمالي المحاضرات في الجلسة: {len(lectures)}/{MAX_LECTURES_PER_SESSION}\n"
+            f"{get_active_status_text(context, lectures)}\n"
+            "تقدر تبعت محاضرة كمان، أو تختار من الأزرار دلوقتي:",
+            reply_markup=get_choices_keyboard(
+                has_mcq_pdf=False,
+                has_summary_pdf=False,
+                has_lectures=True,
+            ),
+        )
+    except Exception as e:
+        logger.error("Error handling document: %s", e)
+        await status_msg.edit_text(f"حدث خطأ أثناء قراءة الملف: {type(e).__name__}")
+
+
+async def send_long_text(chat, text: str) -> None:
+    cleaned = clean_plain_text(text)
+    chunk_size = 3800
+    for i in range(0, len(cleaned), chunk_size):
+        await chat.send_message(cleaned[i : i + chunk_size])
+
+
+def parse_mcq_json(raw_text: str) -> list[dict]:
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        lines = [ln for ln in lines if not ln.strip().startswith("```")]
+        cleaned = "\n".join(lines).strip()
+
+    data = json.loads(cleaned)
+    items = data.get("questions") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return []
+
+    valid_items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        q = clean_plain_text(str(item.get("question", "")))[:280]
+        opts = [
+            clean_plain_text(str(o))[:90]
+            for o in (item.get("options") or [])
+            if clean_plain_text(str(o))
+        ][:10]
+        correct_id = item.get("correct_option_id", 0)
+        exp = clean_plain_text(str(item.get("explanation", "")))
+
+        if q and len(opts) >= 2 and isinstance(correct_id, int) and 0 <= correct_id < len(opts):
+            valid_items.append(
+                {
+                    "question": q,
+                    "options": opts,
+                    "correct_option_id": correct_id,
+                    "explanation": exp,
+                }
+            )
+    return valid_items
+
+
+async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    action = query.data
+    lectures = get_session_lectures(context)
+    has_mcq_pdf = bool(context.user_data.get("last_mcq_items"))
+    has_summary_pdf = bool(context.user_data.get("last_summary_pdf_bytes"))
+    has_lectures = bool(lectures)
+    active_idx = get_active_lecture_index(context, lectures)
+
+    if action == "select_lecture":
+        if not lectures:
+            await query.message.reply_text(
+                "لا توجد محاضرات مخزنة حاليًا لإختيار محاضرة محددة. أرسل ملف PDF أولًا.",
+                reply_markup=get_choices_keyboard(
+                    has_mcq_pdf=has_mcq_pdf,
+                    has_summary_pdf=has_summary_pdf,
+                    has_lectures=False,
+                ),
+            )
+            return
+
+        await query.message.reply_text(
+            "اختر المحاضرة اللي عايز تولّد عليها المحتوى، أو اختر (الكل - مجمّع):",
+            reply_markup=build_lecture_selection_keyboard(lectures, active_idx),
+        )
+        return
+
+    if action.startswith("pick_lec_"):
+        choice = action.replace("pick_lec_", "")
+        context.user_data.pop("last_mcq_items", None)
+        context.user_data.pop("last_summary_pdf_bytes", None)
+
+        if choice == "all":
+            context.user_data.pop("active_lecture_idx", None)
+            status_msg = f"تم تفعيل الوضع المجمّع على كل المحاضرات ({len(lectures)} محاضرة)."
+        else:
+            try:
+                idx = int(choice)
+                if 0 <= idx < len(lectures):
+                    context.user_data["active_lecture_idx"] = idx
+                    lec_title = lectures[idx].get("title", f"Lecture {idx + 1}")
+                    status_msg = f"تم اختيار المحاضرة ({idx + 1}): {lec_title}\nسيتم التوليد على هذه المحاضرة فقط."
+                else:
+                    status_msg = "اختيار غير صالح."
+            except ValueError:
+                status_msg = "اختيار غير صالح."
+
+        await query.message.edit_text(
+            f"{status_msg}\nاختر نوع المحتوى المطلوب:",
+            reply_markup=get_choices_keyboard(
+                has_mcq_pdf=False,
+                has_summary_pdf=False,
+                has_lectures=bool(lectures),
+            ),
+        )
+        return
+
+    if action == "back_to_menu":
+        await query.message.edit_text(
+            f"{get_active_status_text(context, lectures)}\nاختر من الأزرار التالية:",
+            reply_markup=get_choices_keyboard(
+                has_mcq_pdf=has_mcq_pdf,
+                has_summary_pdf=has_summary_pdf,
+                has_lectures=has_lectures,
+            ),
+        )
+        return
+
+    if action == "clear_lectures":
+        context.user_data.clear()
+        gc.collect()
+        await query.message.reply_text(
+            "تم مسح جميع المحاضرات والملفات المؤقتة من الجلسة. أرسل ملفات PDF جديدة للبدء.",
+            reply_markup=get_choices_keyboard(
+                has_mcq_pdf=False,
+                has_summary_pdf=False,
+                has_lectures=False,
+            ),
+        )
+        return
+
+    target_lectures, session_label = get_target_lectures_and_label(context, lectures)
+
+    if action == "export_mcq_pdf":
+        mcq_items = context.user_data.get("last_mcq_items")
+        if not mcq_items:
+            await query.message.reply_text("لا توجد أسئلة MCQ محفوظة حاليًا. اضغط على MCQ Poll أو MCQ Traps & Mix أولًا.")
+            return
+
+        pdf_wait = await query.message.reply_text("جاري تجهيز ملف الـ PDF للأسئلة بخط واضح...")
+        try:
+            pdf_bytes = await asyncio.to_thread(generate_mcq_pdf_bytes, session_label, mcq_items)
+            pdf_io = io.BytesIO(pdf_bytes)
+            pdf_io.name = f"{session_label}_MCQ.pdf"
+            await pdf_wait.delete()
+            await query.message.reply_document(
+                document=pdf_io,
+                filename=f"{session_label}_MCQ.pdf",
+                caption=f"High-Yield MCQ PDF ({len(mcq_items)} questions with answers & explanations) - {session_label}.",
+                reply_markup=get_choices_keyboard(
+                    has_mcq_pdf=True,
+                    has_summary_pdf=has_summary_pdf,
+                    has_lectures=has_lectures,
+                ),
+            )
+            del pdf_bytes
+            gc.collect()
+        except Exception as e:
+            logger.error("Error generating MCQ PDF: %s", e)
+            await pdf_wait.edit_text(f"حدث خطأ أثناء إنشاء ملف الـ PDF: {type(e).__name__}")
+        return
+
+    if action == "export_summary_pdf":
+        summary_pdf_bytes = context.user_data.get("last_summary_pdf_bytes")
+        if not summary_pdf_bytes:
+            await query.message.reply_text("لا يوجد ملخص محفوظ حاليًا. اضغط على Summary (PDF) أولًا.")
+            return
+
+        pdf_io = io.BytesIO(summary_pdf_bytes)
+        pdf_io.name = f"{session_label}_Summary.pdf"
+        await query.message.reply_document(
+            document=pdf_io,
+            filename=f"{session_label}_Summary.pdf",
+            caption=f"High-Yield Summary PDF - {session_label}.",
+            reply_markup=get_choices_keyboard(
+                has_mcq_pdf=has_mcq_pdf,
+                has_summary_pdf=True,
+                has_lectures=has_lectures,
+            ),
+        )
+        return
+
+    if not target_lectures:
+        await query.message.reply_text(
+            "من فضلك أرسل ملف PDF لمحاضرة واحدة على الأقل أولًا.",
+            reply_markup=get_choices_keyboard(
+                has_mcq_pdf=False,
+                has_summary_pdf=False,
+                has_lectures=False,
+            ),
+        )
+        return
+
+    combined_text = build_combined_lecture_text(target_lectures)
+    num_lectures = len(target_lectures)
+    mode = action.replace("mode_", "")
+    scope_desc = session_label if num_lectures == 1 else f"{num_lectures} محاضرات مجمعة"
+    wait_msg = await query.message.reply_text(
+        f"جاري إعداد المحتوى الطبي المركز ({scope_desc})..."
+    )
+
+    try:
+        if mode in ("mcq", "traps"):
+            is_traps = mode == "traps"
+            prompt = build_mcq_json_prompt(combined_text, num_lectures=num_lectures, traps_mode=is_traps)
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=MODEL_NAME,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=MEDICAL_HIGH_YIELD_SYSTEM_PROMPT,
+                    temperature=0.35 if is_traps else 0.3,
+                    response_mime_type="application/json",
+                ),
+            )
+            raw_out = response.text or ""
+            mcq_items = parse_mcq_json(raw_out)
+
+            if not mcq_items:
+                await wait_msg.edit_text("لم أتمكن من تنسيق أسئلة الـ Poll بشكل صحيح. حاول مرة أخرى.")
+                return
+
+            context.user_data["last_mcq_items"] = mcq_items
+            label = "MCQ Traps & Mix" if is_traps else "MCQ"
+            await wait_msg.edit_text(
+                f"تم توليد {len(mcq_items)} سؤال {label} ({scope_desc}). جاري إرسال الاستفتاءات..."
+            )
+
+            for idx, item in enumerate(mcq_items, start=1):
+                await query.message.reply_poll(
+                    question=f"{idx}. {item['question']}"[:295],
+                    options=item["options"],
+                    type="quiz",
+                    correct_option_id=item["correct_option_id"],
+                    is_anonymous=False,
+                )
+                await asyncio.sleep(0.15)
+
+            await query.message.reply_text(
+                f"تم إرسال {len(mcq_items)} سؤال ({label}) كـ Poll بالإنجليزية ({scope_desc}). الشرح التفصيلي والفخاخ موجودة داخل ملف الـ PDF.\n"
+                "تحب تحمّل الأسئلة دي كملف PDF أو تختار حاجة تانية؟",
+                reply_markup=get_choices_keyboard(
+                    has_mcq_pdf=True,
+                    has_summary_pdf=has_summary_pdf,
+                    has_lectures=True,
+                ),
+            )
+            return
+
+        prompt = build_mode_prompt(mode, combined_text, num_lectures=num_lectures)
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=MODEL_NAME,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=MEDICAL_HIGH_YIELD_SYSTEM_PROMPT,
+                temperature=0.3,
+            ),
+        )
+
+        raw_output = response.text or ""
+        if not raw_output.strip():
+            await wait_msg.edit_text("لم يتمكن النموذج من توليد رد مناسب. حاول مرة أخرى.")
+            return
+
+        await wait_msg.delete()
+
+        if mode == "summary":
+            output_text = clean_plain_text(raw_output)
+            summary_pdf_bytes = await asyncio.to_thread(
+                generate_summary_pdf_bytes, session_label, output_text
+            )
+            context.user_data["last_summary_pdf_bytes"] = summary_pdf_bytes
+            pdf_io = io.BytesIO(summary_pdf_bytes)
+            pdf_io.name = f"{session_label}_Summary.pdf"
+
+            await query.message.reply_document(
+                document=pdf_io,
+                filename=f"{session_label}_Summary.pdf",
+                caption=f"ملخص High-Yield ({scope_desc}) بصيغة PDF بخط واضح. تحب تعمل حاجة تانية؟",
+                reply_markup=get_choices_keyboard(
+                    has_mcq_pdf=has_mcq_pdf,
+                    has_summary_pdf=True,
+                    has_lectures=True,
+                ),
+            )
+        elif mode == "anki":
+            anki_content = format_anki_tab_deck(raw_output)
+            if not anki_content:
+                anki_content = clean_plain_text(raw_output)
+
+            anki_bytes = io.BytesIO(anki_content.encode("utf-8"))
+            anki_bytes.name = f"{session_label}_anki.txt"
+            cards_count = len(anki_content.splitlines()) if anki_content else 0
+
+            await query.message.reply_document(
+                document=anki_bytes,
+                filename=f"{session_label}_anki.txt",
+                caption=f"Anki deck ready ({cards_count} cards, Separator: Tab). تحب تعمل حاجة تانية؟",
+                reply_markup=get_choices_keyboard(
+                    has_mcq_pdf=has_mcq_pdf,
+                    has_summary_pdf=has_summary_pdf,
+                    has_lectures=True,
+                ),
+            )
+        else:
+            output_text = clean_plain_text(raw_output)
+            await send_long_text(query.message.chat, output_text)
+            await query.message.reply_text(
+                f"تحب تولّد حاجة تانية ({scope_desc})؟",
+                reply_markup=get_choices_keyboard(
+                    has_mcq_pdf=has_mcq_pdf,
+                    has_summary_pdf=has_summary_pdf,
+                    has_lectures=True,
+                ),
+            )
+
+    except Exception as e:
+        logger.error("Error generating content: %s", e)
+        await wait_msg.edit_text(f"حدث خطأ أثناء التوليد ({type(e).__name__}). حاول مرة أخرى بعد قليل.")
+
+
+def main() -> None:
+    if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
+        raise ValueError("تأكد من ضبط TELEGRAM_BOT_TOKEN و GEMINI_API_KEY في متغيرات البيئة.")
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
+    app.add_handler(CallbackQueryHandler(handle_button_click))
+
+    logger.info("Bot started polling...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
