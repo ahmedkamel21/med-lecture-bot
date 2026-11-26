@@ -541,4 +541,163 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
         try:
             pdf_bytes = await asyncio.to_thread(generate_mcq_pdf_bytes, lecture_title, mcq_items)
             pdf_io = io.BytesIO(pdf_bytes)
-            
+            pdf_io.name = f"{lecture_title}_MCQ.pdf"
+            await pdf_wait.delete()
+            await query.message.reply_document(
+                document=pdf_io,
+                filename=f"{lecture_title}_MCQ.pdf",
+                caption=f"High-Yield MCQ PDF ({len(mcq_items)} questions with answers & explanations).",
+                reply_markup=get_choices_keyboard(has_mcq_pdf=True, has_summary_pdf=has_summary_pdf),
+            )
+        except Exception as e:
+            logger.error("Error generating MCQ PDF: %s", e)
+            await pdf_wait.edit_text(f"حدث خطأ أثناء إنشاء ملف الـ PDF: {type(e).__name__}")
+        return
+
+    if action == "export_summary_pdf":
+        summary_pdf_bytes = context.user_data.get("last_summary_pdf_bytes")
+        if not summary_pdf_bytes:
+            await query.message.reply_text("لا يوجد ملخص محفوظ حاليًا. اضغط على Summary (PDF) أولًا.")
+            return
+
+        pdf_io = io.BytesIO(summary_pdf_bytes)
+        pdf_io.name = f"{lecture_title}_Summary.pdf"
+        await query.message.reply_document(
+            document=pdf_io,
+            filename=f"{lecture_title}_Summary.pdf",
+            caption="High-Yield Summary PDF.",
+            reply_markup=get_choices_keyboard(has_mcq_pdf=has_mcq_pdf, has_summary_pdf=True),
+        )
+        return
+
+    lecture_text = context.user_data.get("lecture_text")
+    if not lecture_text:
+        await query.message.reply_text("من فضلك أرسل ملف PDF للمحاضرة أولًا.")
+        return
+
+    mode = action.replace("mode_", "")
+    wait_msg = await query.message.reply_text("جاري إعداد المحتوى الطبي المركز (High-Yield English)...")
+
+    try:
+        if mode in ("mcq", "traps"):
+            is_traps = mode == "traps"
+            prompt = build_mcq_json_prompt(lecture_text, traps_mode=is_traps)
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=MODEL_NAME,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=MEDICAL_HIGH_YIELD_SYSTEM_PROMPT,
+                    temperature=0.35 if is_traps else 0.3,
+                    response_mime_type="application/json",
+                ),
+            )
+            raw_out = response.text or ""
+            mcq_items = parse_mcq_json(raw_out)
+
+            if not mcq_items:
+                await wait_msg.edit_text("لم أتمكن من تنسيق أسئلة الـ Poll بشكل صحيح. حاول مرة أخرى.")
+                return
+
+            context.user_data["last_mcq_items"] = mcq_items
+            label = "MCQ Traps & Mix" if is_traps else "MCQ"
+            await wait_msg.edit_text(f"تم توليد {len(mcq_items)} سؤال {label} بالإنجليزية. جاري إرسال الاستفتاءات...")
+
+            for idx, item in enumerate(mcq_items, start=1):
+                await query.message.reply_poll(
+                    question=f"{idx}. {item['question']}"[:295],
+                    options=item["options"],
+                    type="quiz",
+                    correct_option_id=item["correct_option_id"],
+                    is_anonymous=False,
+                )
+                await asyncio.sleep(0.15)
+
+            await query.message.reply_text(
+                f"تم إرسال {len(mcq_items)} سؤال ({label}) كـ Poll بالإنجليزية. الشرح التفصيلي والفخاخ موجودة داخل ملف الـ PDF.\n"
+                "تحب تحمّل الأسئلة دي كملف PDF أو تختار حاجة تانية من نفس المحاضرة؟",
+                reply_markup=get_choices_keyboard(has_mcq_pdf=True, has_summary_pdf=has_summary_pdf),
+            )
+            return
+
+        prompt = build_mode_prompt(mode, lecture_text)
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=MODEL_NAME,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=MEDICAL_HIGH_YIELD_SYSTEM_PROMPT,
+                temperature=0.3,
+            ),
+        )
+
+        output_text = clean_plain_text(response.text or "")
+        if not output_text:
+            await wait_msg.edit_text("لم يتمكن النموذج من توليد رد مناسب. حاول مرة أخرى.")
+            return
+
+        await wait_msg.delete()
+
+        if mode == "summary":
+            summary_pdf_bytes = await asyncio.to_thread(
+                generate_summary_pdf_bytes, lecture_title, output_text
+            )
+            context.user_data["last_summary_pdf_bytes"] = summary_pdf_bytes
+            pdf_io = io.BytesIO(summary_pdf_bytes)
+            pdf_io.name = f"{lecture_title}_Summary.pdf"
+
+            await query.message.reply_document(
+                document=pdf_io,
+                filename=f"{lecture_title}_Summary.pdf",
+                caption="ملخص High-Yield منسق بصيغة PDF بخط واضح ومريح للقراءة. تحب تعمل حاجة تانية؟",
+                reply_markup=get_choices_keyboard(has_mcq_pdf=has_mcq_pdf, has_summary_pdf=True),
+            )
+        elif mode == "anki":
+            cleaned_lines = []
+            for line in output_text.splitlines():
+                line_stripped = line.strip()
+                if not line_stripped or line_stripped.startswith("```"):
+                    continue
+                if "|" in line_stripped:
+                    cleaned_lines.append(line_stripped)
+
+            anki_content = "\n".join(cleaned_lines) if cleaned_lines else output_text
+            anki_bytes = io.BytesIO(anki_content.encode("utf-8"))
+            anki_bytes.name = f"{lecture_title}_anki.txt"
+
+            await query.message.reply_document(
+                document=anki_bytes,
+                filename=f"{lecture_title}_anki.txt",
+                caption="Anki deck ready for direct import (Separator: |). تحب تعمل حاجة تانية من نفس المحاضرة؟",
+                reply_markup=get_choices_keyboard(has_mcq_pdf=has_mcq_pdf, has_summary_pdf=has_summary_pdf),
+            )
+        else:
+            await send_long_text(query.message.chat, output_text)
+            await query.message.reply_text(
+                "تحب تولّد حاجة تانية من نفس المحاضرة؟",
+                reply_markup=get_choices_keyboard(has_mcq_pdf=has_mcq_pdf, has_summary_pdf=has_summary_pdf),
+            )
+
+    except Exception as e:
+        logger.error("Error generating content: %s", e)
+        await wait_msg.edit_text(f"حدث خطأ أثناء التوليد ({type(e).__name__}). حاول مرة أخرى بعد قليل.")
+
+
+def main() -> None:
+    if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
+        raise ValueError("تأكد من ضبط TELEGRAM_BOT_TOKEN و GEMINI_API_KEY في متغيرات البيئة.")
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
+    app.add_handler(CallbackQueryHandler(handle_button_click))
+
+    logger.info("Bot started polling...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
