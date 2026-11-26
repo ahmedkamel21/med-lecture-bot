@@ -32,13 +32,18 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-MODEL_NAME = "gemini-3.8-flash"
+# قائمة النماذج بالترتيب: يبدأ بالأساسي وينتقل تلقائيًا للبدائل المستقرة عند ضغط السيرفر (503)
+MODELS_FALLBACK_CHAIN = [
+    "gemini-3.8-flash",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+]
 
-# حدود النص: حد المحاضرة المفردة ثابت (28000) وتقليل حد المحاضرات المجمعة فقط لتخفيف الضغط
+# حدود النص: حد المحاضرة المفردة ثابت (28000) وحد متوازن للمحاضرات المجمعة
 MAX_LECTURES_PER_SESSION = 8
 MAX_CHARS_SINGLE_LECTURE = 28000
 MAX_CHARS_PER_LECTURE = 4500
-MAX_COMBINED_CHARS = 36000
+MAX_COMBINED_CHARS = 22000
 MAX_PREVIOUS_QUESTIONS_CONTEXT = 120
 
 FONT_URL = (
@@ -64,43 +69,45 @@ Use plain text with clear line breaks, numbered items, or simple dashes (- ) onl
 async def generate_with_retry(
     contents: str,
     config: types.GenerateContentConfig,
-    max_attempts: int = 3,
+    attempts_per_model: int = 2,
 ):
-    """ينفذ طلب التوليد مع إعادة المحاولة تلقائيًا حتى 3 مرات عند ضغط السيرفر المؤقت (503 / ServerError)."""
-    delays = [2.0, 4.5, 7.5]
+    """يحاول التوليد بالنموذج الأساسي، وإذا واجه 503/ServerError ينتقل تلقائيًا للنماذج البديلة المستقرة."""
     last_err = None
 
-    for attempt in range(1, max_attempts + 1):
-        try:
-            return await asyncio.to_thread(
-                client.models.generate_content,
-                model=MODEL_NAME,
-                contents=contents,
-                config=config,
-            )
-        except Exception as e:
-            last_err = e
-            err_str = str(e).lower()
-            is_transient = (
-                "503" in err_str
-                or "unavailable" in err_str
-                or "servererror" in err_str
-                or "high demand" in err_str
-                or "429" in err_str
-                or "resource_exhausted" in err_str
-                or "timeout" in err_str
-            )
-            if not is_transient or attempt == max_attempts:
-                raise
-            wait_sec = delays[min(attempt - 1, len(delays) - 1)]
-            logger.warning(
-                "Transient Gemini error on attempt %s/%s (%s). Retrying in %.1fs...",
-                attempt,
-                max_attempts,
-                type(e).__name__,
-                wait_sec,
-            )
-            await asyncio.sleep(wait_sec)
+    for model_name in MODELS_FALLBACK_CHAIN:
+        for attempt in range(1, attempts_per_model + 1):
+            try:
+                return await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=model_name,
+                    contents=contents,
+                    config=config,
+                )
+            except Exception as e:
+                last_err = e
+                err_str = str(e).lower()
+                is_transient_or_model_err = (
+                    "503" in err_str
+                    or "unavailable" in err_str
+                    or "servererror" in err_str
+                    or "high demand" in err_str
+                    or "429" in err_str
+                    or "resource_exhausted" in err_str
+                    or "404" in err_str
+                    or "not found" in err_str
+                    or "timeout" in err_str
+                )
+                if not is_transient_or_model_err:
+                    raise
+                logger.warning(
+                    "Model %s failed on attempt %s/%s (%s: %s). Switching/retrying...",
+                    model_name,
+                    attempt,
+                    attempts_per_model,
+                    type(e).__name__,
+                    str(e)[:120],
+                )
+                await asyncio.sleep(1.5)
 
     if last_err:
         raise last_err
@@ -1194,7 +1201,6 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                     temperature=0.38 if (is_traps or is_links or is_more) else 0.3,
                     response_mime_type="application/json",
                 ),
-                max_attempts=3,
             )
             raw_out = response.text or ""
             new_mcq_items = parse_mcq_json(raw_out)
@@ -1279,7 +1285,6 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 system_instruction=MEDICAL_HIGH_YIELD_SYSTEM_PROMPT,
                 temperature=0.35 if is_more else 0.3,
             ),
-            max_attempts=3,
         )
 
         raw_output = response.text or ""
