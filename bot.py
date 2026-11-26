@@ -32,11 +32,11 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# قائمة النماذج بالترتيب: يبدأ بالأساسي وينتقل تلقائيًا للبدائل المستقرة عند ضغط السيرفر (503)
+# قائمة النماذج بالترتيب: يبدأ بالأساسي وينتقل تلقائيًا للنماذج المتاحة عند 503 أو 404
 MODELS_FALLBACK_CHAIN = [
     "gemini-3.8-flash",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
 ]
 
 # حدود النص: حد المحاضرة المفردة ثابت (28000) وحد متوازن للمحاضرات المجمعة
@@ -71,7 +71,7 @@ async def generate_with_retry(
     config: types.GenerateContentConfig,
     attempts_per_model: int = 2,
 ):
-    """يحاول التوليد بالنموذج الأساسي، وإذا واجه 503/ServerError ينتقل تلقائيًا للنماذج البديلة المستقرة."""
+    """يحاول التوليد بالنموذج الأساسي، وإذا واجه 503/ServerError/404 ينتقل تلقائيًا للنماذج البديلة."""
     last_err = None
 
     for model_name in MODELS_FALLBACK_CHAIN:
@@ -94,7 +94,9 @@ async def generate_with_retry(
                     or "429" in err_str
                     or "resource_exhausted" in err_str
                     or "404" in err_str
+                    or "not_found" in err_str
                     or "not found" in err_str
+                    or "no longer available" in err_str
                     or "timeout" in err_str
                 )
                 if not is_transient_or_model_err:
@@ -105,7 +107,7 @@ async def generate_with_retry(
                     attempt,
                     attempts_per_model,
                     type(e).__name__,
-                    str(e)[:120],
+                    str(e)[:140],
                 )
                 await asyncio.sleep(1.5)
 
