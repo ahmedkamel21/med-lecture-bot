@@ -34,11 +34,11 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 MODEL_NAME = "gemini-3.8-flash"
 
-# حدود النص: حد أعلى للمحاضرة المفردة وحد متوازن للمحاضرات المجمعة لحماية الرامات (256 MB)
+# حدود النص: حد أعلى للمحاضرة المفردة وحد متوازن للمحاضرات المجمعة لحماية الرامات وتقليل ضغط التوليد
 MAX_LECTURES_PER_SESSION = 8
 MAX_CHARS_SINGLE_LECTURE = 28000
-MAX_CHARS_PER_LECTURE = 7500
-MAX_COMBINED_CHARS = 48000
+MAX_CHARS_PER_LECTURE = 6000
+MAX_COMBINED_CHARS = 34000
 MAX_PREVIOUS_QUESTIONS_CONTEXT = 120
 
 FONT_URL = (
@@ -59,6 +59,51 @@ CRITICAL FORMATTING RULE:
 Do NOT use asterisks (* or **), markdown headers (#, ##, ###), horizontal rules (---), or markdown table pipes (| :--- |).
 Use plain text with clear line breaks, numbered items, or simple dashes (- ) only where helpful so the text is clean and easy to read.
 """
+
+
+async def generate_with_retry(
+    contents: str,
+    config: types.GenerateContentConfig,
+    max_attempts: int = 3,
+):
+    """ينفذ طلب التوليد مع إعادة المحاولة تلقائيًا عند ضغط السيرفر المؤقت (503 / ServerError)."""
+    delays = [2.0, 4.5, 7.5]
+    last_err = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await asyncio.to_thread(
+                client.models.generate_content,
+                model=MODEL_NAME,
+                contents=contents,
+                config=config,
+            )
+        except Exception as e:
+            last_err = e
+            err_str = str(e).lower()
+            is_transient = (
+                "503" in err_str
+                or "unavailable" in err_str
+                or "servererror" in err_str
+                or "high demand" in err_str
+                or "429" in err_str
+                or "resource_exhausted" in err_str
+                or "timeout" in err_str
+            )
+            if not is_transient or attempt == max_attempts:
+                raise
+            wait_sec = delays[min(attempt - 1, len(delays) - 1)]
+            logger.warning(
+                "Transient Gemini error on attempt %s/%s (%s). Retrying in %.1fs...",
+                attempt,
+                max_attempts,
+                type(e).__name__,
+                wait_sec,
+            )
+            await asyncio.sleep(wait_sec)
+
+    if last_err:
+        raise last_err
 
 
 def clean_plain_text(text: str) -> str:
@@ -1142,9 +1187,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 is_more=is_more,
                 seen_questions=seen_list,
             )
-            response = await asyncio.to_thread(
-                client.models.generate_content,
-                model=MODEL_NAME,
+            response = await generate_with_retry(
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=MEDICAL_HIGH_YIELD_SYSTEM_PROMPT,
@@ -1229,9 +1272,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
             is_more=is_more,
             seen_questions=seen_list,
         )
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=MODEL_NAME,
+        response = await generate_with_retry(
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=MEDICAL_HIGH_YIELD_SYSTEM_PROMPT,
