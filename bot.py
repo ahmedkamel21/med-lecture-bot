@@ -46,16 +46,48 @@ Golden Rule: Focus heavily on high-yield exam topics ("what gets tested"):
 - Classic clinical vignettes, distinguishing presentations, and high-yield indications/contraindications/adverse effects.
 - Crucial comparisons, differential points, and critical exceptions.
 Strictly avoid trivial facts or low-yield filler details.
-Write ALL medical content, questions, choices, answers, summaries, explanations, and Anki cards strictly in clear, concise, exam-oriented English.
+Write ALL medical content, questions, choices, answers, summaries, explanations, and Anki cards strictly in clear, readable English.
+CRITICAL FORMATTING RULE:
+Do NOT use asterisks (* or **), markdown headers (#, ##, ###), horizontal rules (---), or markdown table pipes (| :--- |).
+Use plain text with clear line breaks, numbered items, or simple dashes (- ) only where helpful so the text is clean and easy to read.
 """
+
+
+def clean_plain_text(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = text
+    # إزالة النجوم تمامًا
+    cleaned = cleaned.replace("*", "")
+    # إزالة رموز العناوين والخطوط الفاصلة من بداية الأسطر
+    lines = []
+    for line in cleaned.splitlines():
+        s = line.strip()
+        if not s:
+            lines.append("")
+            continue
+        if re.fullmatch(r"[-_=~]{3,}", s):
+            continue
+        if re.fullmatch(r"\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?", s):
+            continue
+        s = re.sub(r"^#{1,6}\s*", "", s)
+        # تحويل صفوف الجداول البسيطة إلى سطور مقروءة بدل الأعمدة المكسورة
+        if s.startswith("|") and s.endswith("|"):
+            cells = [c.strip() for c in s.strip("|").split("|") if c.strip()]
+            s = "  •  ".join(cells)
+        lines.append(s)
+
+    result = "\n".join(lines)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
 
 
 def sanitize_pdf_text(text: str) -> str:
     if not text:
         return ""
-    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", text)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    # تقسيم أي كلمة متصلة طويلة جدًا (أكثر من 40 حرفًا) حتى لا تسبب مشكلة في التفاف السطر
+    cleaned = clean_plain_text(text)
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", cleaned)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned).strip()
     words = []
     for word in cleaned.split(" "):
         if len(word) > 40:
@@ -80,10 +112,10 @@ def get_font_path() -> str | None:
     return None
 
 
-def generate_mcq_pdf_bytes(lecture_title: str, mcq_items: list[dict]) -> bytes:
+def _create_base_pdf() -> tuple[FPDF, str, float]:
     pdf = FPDF(orientation="P", unit="mm", format="A4")
-    pdf.set_margins(left=12, top=12, right=12)
-    pdf.set_auto_page_break(auto=True, margin=12)
+    pdf.set_margins(left=14, top=14, right=14)
+    pdf.set_auto_page_break(auto=True, margin=14)
     pdf.add_page()
 
     usable_width = pdf.w - pdf.l_margin - pdf.r_margin
@@ -98,71 +130,31 @@ def generate_mcq_pdf_bytes(lecture_title: str, mcq_items: list[dict]) -> bytes:
             logger.warning("Failed adding custom font, fallback to Helvetica: %s", e)
             font_family = "Helvetica"
 
-    def write_line_block(txt: str, font_size: int, line_h: float, space_after: float = 1.5) -> None:
-        safe_txt = sanitize_pdf_text(txt)
-        if not safe_txt:
-            return
-        if font_family == "Helvetica":
-            safe_txt = safe_txt.encode("latin-1", errors="replace").decode("latin-1")
-        pdf.set_x(pdf.l_margin)
-        pdf.set_font(font_family, size=font_size)
-        pdf.multi_cell(usable_width, line_h, text=safe_txt)
-        if space_after > 0:
-            pdf.ln(space_after)
+    return pdf, font_family, usable_width
 
-    safe_title = sanitize_pdf_text(lecture_title) or "Lecture"
-    write_line_block(
-        f"High-Yield MCQ ({len(mcq_items)} Questions) - {safe_title}",
-        font_size=13,
-        line_h=7,
-        space_after=4,
-    )
 
-    for idx, item in enumerate(mcq_items, start=1):
-        try:
-            question_text = str(item.get("question", "")).strip()
-            options = item.get("options") or []
-            correct_idx = item.get("correct_option_id", 0)
-            explanation = str(item.get("explanation", "")).strip()
+def _write_pdf_block(
+    pdf: FPDF,
+    font_family: str,
+    usable_width: float,
+    txt: str,
+    font_size: int,
+    line_h: float,
+    space_after: float = 2.0,
+) -> None:
+    safe_txt = sanitize_pdf_text(txt)
+    if not safe_txt:
+        return
+    if font_family == "Helvetica":
+        safe_txt = safe_txt.encode("latin-1", errors="replace").decode("latin-1")
+    pdf.set_x(pdf.l_margin)
+    pdf.set_font(font_family, size=font_size)
+    pdf.multi_cell(usable_width, line_h, text=safe_txt)
+    if space_after > 0:
+        pdf.ln(space_after)
 
-            write_line_block(f"Q{idx}: {question_text}", font_size=11, line_h=6, space_after=1)
 
-            for opt_i, opt_val in enumerate(options):
-                letter = chr(65 + opt_i) if opt_i < 26 else str(opt_i + 1)
-                write_line_block(
-                    f"   {letter}) {str(opt_val).strip()}",
-                    font_size=10,
-                    line_h=5.5,
-                    space_after=0.5,
-                )
-
-            if isinstance(correct_idx, int) and 0 <= correct_idx < len(options):
-                correct_letter = chr(65 + correct_idx) if correct_idx < 26 else str(correct_idx + 1)
-                correct_label = str(options[correct_idx]).strip()
-            else:
-                correct_letter = "A"
-                correct_label = ""
-
-            write_line_block(
-                f"Correct Answer: ({correct_letter}) {correct_label}",
-                font_size=10,
-                line_h=5.5,
-                space_after=1,
-            )
-
-            if explanation:
-                write_line_block(
-                    f"Explanation: {explanation}",
-                    font_size=10,
-                    line_h=5.5,
-                    space_after=3,
-                )
-            else:
-                pdf.ln(2)
-        except Exception as q_err:
-            logger.warning("Skipping malformed question %s in PDF: %s", idx, q_err)
-            continue
-
+def _output_pdf_bytes(pdf: FPDF) -> bytes:
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp_path = tmp.name
 
@@ -173,6 +165,134 @@ def generate_mcq_pdf_bytes(lecture_title: str, mcq_items: list[dict]) -> bytes:
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+
+
+def generate_mcq_pdf_bytes(lecture_title: str, mcq_items: list[dict]) -> bytes:
+    pdf, font_family, usable_width = _create_base_pdf()
+
+    safe_title = sanitize_pdf_text(lecture_title) or "Lecture"
+    # خط كبير إلى متوسط ومريح للقراءة
+    _write_pdf_block(
+        pdf,
+        font_family,
+        usable_width,
+        f"High-Yield MCQ ({len(mcq_items)} Questions) - {safe_title}",
+        font_size=16,
+        line_h=8.5,
+        space_after=5.0,
+    )
+
+    for idx, item in enumerate(mcq_items, start=1):
+        try:
+            question_text = str(item.get("question", "")).strip()
+            options = item.get("options") or []
+            correct_idx = item.get("correct_option_id", 0)
+            explanation = str(item.get("explanation", "")).strip()
+
+            _write_pdf_block(
+                pdf,
+                font_family,
+                usable_width,
+                f"Q{idx}: {question_text}",
+                font_size=13,
+                line_h=7.2,
+                space_after=2.0,
+            )
+
+            for opt_i, opt_val in enumerate(options):
+                letter = chr(65 + opt_i) if opt_i < 26 else str(opt_i + 1)
+                _write_pdf_block(
+                    pdf,
+                    font_family,
+                    usable_width,
+                    f"   {letter}) {str(opt_val).strip()}",
+                    font_size=12,
+                    line_h=6.8,
+                    space_after=1.2,
+                )
+
+            if isinstance(correct_idx, int) and 0 <= correct_idx < len(options):
+                correct_letter = chr(65 + correct_idx) if correct_idx < 26 else str(correct_idx + 1)
+                correct_label = str(options[correct_idx]).strip()
+            else:
+                correct_letter = "A"
+                correct_label = ""
+
+            _write_pdf_block(
+                pdf,
+                font_family,
+                usable_width,
+                f"Correct Answer: ({correct_letter}) {correct_label}",
+                font_size=12,
+                line_h=6.8,
+                space_after=1.5,
+            )
+
+            if explanation:
+                _write_pdf_block(
+                    pdf,
+                    font_family,
+                    usable_width,
+                    f"Explanation: {explanation}",
+                    font_size=12,
+                    line_h=6.8,
+                    space_after=5.0,
+                )
+            else:
+                pdf.ln(3.5)
+        except Exception as q_err:
+            logger.warning("Skipping malformed question %s in PDF: %s", idx, q_err)
+            continue
+
+    return _output_pdf_bytes(pdf)
+
+
+def generate_summary_pdf_bytes(lecture_title: str, summary_text: str) -> bytes:
+    pdf, font_family, usable_width = _create_base_pdf()
+
+    safe_title = sanitize_pdf_text(lecture_title) or "Lecture"
+    _write_pdf_block(
+        pdf,
+        font_family,
+        usable_width,
+        f"High-Yield Summary - {safe_title}",
+        font_size=16,
+        line_h=8.5,
+        space_after=5.0,
+    )
+
+    cleaned_summary = clean_plain_text(summary_text)
+    paragraphs = [p.strip() for p in cleaned_summary.split("\n") if p.strip()]
+
+    for para in paragraphs:
+        is_heading = (
+            len(para) <= 85
+            and not para.endswith((".", "?", "!", ":", ";"))
+            and (para.istitle() or para.isupper() or re.match(r"^(\d+[\).\s]|Part\s+\d+|Section\s+\d+|High-Yield)", para, re.I))
+        )
+        if is_heading:
+            pdf.ln(2.0)
+            _write_pdf_block(
+                pdf,
+                font_family,
+                usable_width,
+                para,
+                font_size=14,
+                line_h=7.8,
+                space_after=2.0,
+            )
+        else:
+            _write_pdf_block(
+                pdf,
+                font_family,
+                usable_width,
+                para,
+                font_size=12.5,
+                line_h=7.0,
+                space_after=2.5,
+            )
+
+    return _output_pdf_bytes(pdf)
 
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
@@ -206,6 +326,7 @@ Strict count rules:
 - Question stem must be <= 260 characters.
 - Set `correct_option_id` as an integer from 0 to 3.
 - Include a concise, high-yield `explanation` in English.
+- Do NOT use asterisks (*) in any field.
 
 Return valid JSON only in this exact structure:
 {{
@@ -231,28 +352,31 @@ def build_mode_prompt(mode: str, lecture_text: str) -> str:
         task_instruction = """
 Generate high-yield Short Answer Questions (SAQs) in English based on the most testable points in this lecture.
 - Focus on mechanisms, comparisons, clinical reasoning, and key distinctions.
-- Provide a concise, bulleted model answer in English right after each question.
+- Provide a concise model answer in English right after each question.
+- Do NOT use asterisks (*), markdown headers (#), or markdown tables.
 """
     elif mode == "mix":
         task_instruction = """
 Generate a focused high-yield Mix of English MCQs (vignettes/exam traps) and concise English SAQs from the most testable parts of this lecture.
 - Include clear answers and brief high-yield explanations in English.
+- Do NOT use asterisks (*), markdown headers (#), or markdown tables. Present comparisons as clean structured lines instead of tables.
 """
     elif mode == "summary":
         task_instruction = """
-Create a high-yield English medical exam review summary of this lecture.
-- Organize with clear headings and bullet points.
+Create a well-structured, high-yield English medical exam review summary of this lecture.
+- Organize with clear section titles and short, readable paragraphs or dash points (- ).
 - Highlight key mechanisms, comparisons, exceptions, and clinical/exam correlations. Remove fluff.
+- Do NOT use asterisks (*), markdown headers (#), or markdown tables.
 """
     elif mode == "anki":
         task_instruction = """
 Create Anki flashcards in English ready for direct import using pipe ( | ) separation ONLY, one card per line, with NO numbering, intro, or extra commentary.
 Format per line:
 Question or clinical vignette in English | Concise high-yield answer + key differentiator in English
-Focus strictly on high-yield exam points.
+Focus strictly on high-yield exam points and avoid asterisks (*).
 """
     else:
-        task_instruction = "Summarize the high-yield exam points of this lecture in English."
+        task_instruction = "Summarize the high-yield exam points of this lecture in English without asterisks."
 
     return f"""{task_instruction}
 
@@ -263,7 +387,7 @@ Lecture content:
 """
 
 
-def get_choices_keyboard(has_mcq_pdf: bool = False) -> InlineKeyboardMarkup:
+def get_choices_keyboard(has_mcq_pdf: bool = False, has_summary_pdf: bool = False) -> InlineKeyboardMarkup:
     keyboard = [
         [
             InlineKeyboardButton("MCQ Poll (High-Yield)", callback_data="mode_mcq"),
@@ -271,7 +395,7 @@ def get_choices_keyboard(has_mcq_pdf: bool = False) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("Mix (MCQ + SAQ)", callback_data="mode_mix"),
-            InlineKeyboardButton("Summary", callback_data="mode_summary"),
+            InlineKeyboardButton("Summary (PDF)", callback_data="mode_summary"),
         ],
         [
             InlineKeyboardButton("Anki Ready (.txt)", callback_data="mode_anki"),
@@ -281,22 +405,26 @@ def get_choices_keyboard(has_mcq_pdf: bool = False) -> InlineKeyboardMarkup:
         keyboard.append(
             [InlineKeyboardButton("تحميل أسئلة الـ MCQ كملف PDF", callback_data="export_mcq_pdf")]
         )
+    if has_summary_pdf:
+        keyboard.append(
+            [InlineKeyboardButton("إعادة تحميل الملخص كملف PDF", callback_data="export_summary_pdf")]
+        )
     return InlineKeyboardMarkup(keyboard)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     welcome_text = (
         "أهلًا بك في بوت مذاكرة الطب (High-Yield - English Exams)\n\n"
-        "1. أرسل لي ملف المحاضرة بصيغة **PDF**.\n"
+        "1. أرسل لي ملف المحاضرة بصيغة PDF.\n"
         "2. سأحلل الملف وأعرض لك أزرار اختيار (كل الأسئلة والملخصات والـ Anki بالإنجليزية):\n"
-        "   • **MCQ Poll** (أسئلة تفاعلية كـ Poll بحد أدنى 30 سؤال + إمكانية تحميلها PDF مع الشرح)\n"
-        "   • **SAQ** (أسئلة قصيرة بالإنجليزية مع إجابات نموذجية)\n"
-        "   • **Mix** (مزيج MCQ + SAQ بالإنجليزية)\n"
-        "   • **Summary** (ملخص High-Yield بالإنجليزية)\n"
-        "   • **Anki Ready (.txt)** (ملف جاهز للاستيراد المباشر في Anki بالإنجليزية)\n\n"
+        "   - MCQ Poll (أسئلة تفاعلية كـ Poll بحد أدنى 30 سؤال + إمكانية تحميلها PDF بخط واضح)\n"
+        "   - SAQ (أسئلة قصيرة بالإنجليزية مع إجابات نموذجية)\n"
+        "   - Mix (مزيج MCQ + SAQ بتنسيق نظيف بدون نجوم)\n"
+        "   - Summary (ملخص High-Yield بتنسيق جميل وملف PDF بخط واضح)\n"
+        "   - Anki Ready (.txt) (ملف جاهز للاستيراد المباشر في Anki بالإنجليزية)\n\n"
         "التركيز الأساسي دائمًا على الأجزاء المهمة وموضع السؤال لتوفير وقتك."
     )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+    await update.message.reply_text(welcome_text)
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -326,12 +454,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         context.user_data["lecture_text"] = lecture_text
         context.user_data["lecture_title"] = os.path.splitext(file_name)[0][:40]
         context.user_data.pop("last_mcq_items", None)
+        context.user_data.pop("last_summary_pdf_bytes", None)
 
         await status_msg.edit_text(
-            f"تم تحليل المحاضرة: *{file_name}*\n"
+            f"تم تحليل المحاضرة: {file_name}\n"
             "عايز تعمل إيه دلوقتي؟ اختر من الأزرار التالية:",
-            reply_markup=get_choices_keyboard(has_mcq_pdf=False),
-            parse_mode="Markdown",
+            reply_markup=get_choices_keyboard(has_mcq_pdf=False, has_summary_pdf=False),
         )
     except Exception as e:
         logger.error("Error handling document: %s", e)
@@ -339,9 +467,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def send_long_text(chat, text: str) -> None:
+    cleaned = clean_plain_text(text)
     chunk_size = 3800
-    for i in range(0, len(text), chunk_size):
-        await chat.send_message(text[i : i + chunk_size])
+    for i in range(0, len(cleaned), chunk_size):
+        await chat.send_message(cleaned[i : i + chunk_size])
 
 
 def parse_mcq_json(raw_text: str) -> list[dict]:
@@ -360,10 +489,14 @@ def parse_mcq_json(raw_text: str) -> list[dict]:
     for item in items:
         if not isinstance(item, dict):
             continue
-        q = str(item.get("question", "")).strip()[:280]
-        opts = [str(o).strip()[:90] for o in (item.get("options") or []) if str(o).strip()][:10]
+        q = clean_plain_text(str(item.get("question", "")))[:280]
+        opts = [
+            clean_plain_text(str(o))[:90]
+            for o in (item.get("options") or [])
+            if clean_plain_text(str(o))
+        ][:10]
         correct_id = item.get("correct_option_id", 0)
-        exp = str(item.get("explanation", "")).strip()
+        exp = clean_plain_text(str(item.get("explanation", "")))
 
         if q and len(opts) >= 2 and isinstance(correct_id, int) and 0 <= correct_id < len(opts):
             valid_items.append(
@@ -383,6 +516,8 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     action = query.data
     lecture_title = context.user_data.get("lecture_title", "lecture")
+    has_mcq_pdf = bool(context.user_data.get("last_mcq_items"))
+    has_summary_pdf = bool(context.user_data.get("last_summary_pdf_bytes"))
 
     if action == "export_mcq_pdf":
         mcq_items = context.user_data.get("last_mcq_items")
@@ -390,7 +525,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.message.reply_text("لا توجد أسئلة MCQ محفوظة حاليًا. اضغط على MCQ Poll أولًا.")
             return
 
-        pdf_wait = await query.message.reply_text("جاري تجهيز ملف الـ PDF للأسئلة والإجابات والشرح...")
+        pdf_wait = await query.message.reply_text("جاري تجهيز ملف الـ PDF للأسئلة بخط واضح...")
         try:
             pdf_bytes = await asyncio.to_thread(generate_mcq_pdf_bytes, lecture_title, mcq_items)
             pdf_io = io.BytesIO(pdf_bytes)
@@ -400,11 +535,27 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 document=pdf_io,
                 filename=f"{lecture_title}_MCQ.pdf",
                 caption=f"High-Yield MCQ PDF ({len(mcq_items)} questions with answers & explanations).",
-                reply_markup=get_choices_keyboard(has_mcq_pdf=True),
+                reply_markup=get_choices_keyboard(has_mcq_pdf=True, has_summary_pdf=has_summary_pdf),
             )
         except Exception as e:
             logger.error("Error generating MCQ PDF: %s", e)
             await pdf_wait.edit_text(f"حدث خطأ أثناء إنشاء ملف الـ PDF: {type(e).__name__}")
+        return
+
+    if action == "export_summary_pdf":
+        summary_pdf_bytes = context.user_data.get("last_summary_pdf_bytes")
+        if not summary_pdf_bytes:
+            await query.message.reply_text("لا يوجد ملخص محفوظ حاليًا. اضغط على Summary (PDF) أولًا.")
+            return
+
+        pdf_io = io.BytesIO(summary_pdf_bytes)
+        pdf_io.name = f"{lecture_title}_Summary.pdf"
+        await query.message.reply_document(
+            document=pdf_io,
+            filename=f"{lecture_title}_Summary.pdf",
+            caption="High-Yield Summary PDF.",
+            reply_markup=get_choices_keyboard(has_mcq_pdf=has_mcq_pdf, has_summary_pdf=True),
+        )
         return
 
     lecture_text = context.user_data.get("lecture_text")
@@ -451,7 +602,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.message.reply_text(
                 f"تم إرسال {len(mcq_items)} سؤال كـ Poll بالإنجليزية. الشرح التفصيلي لكل سؤال موجود داخل ملف الـ PDF.\n"
                 "تحب تحمّل الأسئلة دي كملف PDF أو تختار حاجة تانية من نفس المحاضرة؟",
-                reply_markup=get_choices_keyboard(has_mcq_pdf=True),
+                reply_markup=get_choices_keyboard(has_mcq_pdf=True, has_summary_pdf=has_summary_pdf),
             )
             return
 
@@ -466,15 +617,28 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
             ),
         )
 
-        output_text = (response.text or "").strip()
+        output_text = clean_plain_text(response.text or "")
         if not output_text:
             await wait_msg.edit_text("لم يتمكن النموذج من توليد رد مناسب. حاول مرة أخرى.")
             return
 
         await wait_msg.delete()
-        has_pdf = bool(context.user_data.get("last_mcq_items"))
 
-        if mode == "anki":
+        if mode == "summary":
+            summary_pdf_bytes = await asyncio.to_thread(
+                generate_summary_pdf_bytes, lecture_title, output_text
+            )
+            context.user_data["last_summary_pdf_bytes"] = summary_pdf_bytes
+            pdf_io = io.BytesIO(summary_pdf_bytes)
+            pdf_io.name = f"{lecture_title}_Summary.pdf"
+
+            await query.message.reply_document(
+                document=pdf_io,
+                filename=f"{lecture_title}_Summary.pdf",
+                caption="ملخص High-Yield منسق بصيغة PDF بخط واضح ومريح للقراءة. تحب تعمل حاجة تانية؟",
+                reply_markup=get_choices_keyboard(has_mcq_pdf=has_mcq_pdf, has_summary_pdf=True),
+            )
+        elif mode == "anki":
             cleaned_lines = []
             for line in output_text.splitlines():
                 line_stripped = line.strip()
@@ -491,13 +655,13 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 document=anki_bytes,
                 filename=f"{lecture_title}_anki.txt",
                 caption="Anki deck ready for direct import (Separator: |). تحب تعمل حاجة تانية من نفس المحاضرة؟",
-                reply_markup=get_choices_keyboard(has_mcq_pdf=has_pdf),
+                reply_markup=get_choices_keyboard(has_mcq_pdf=has_mcq_pdf, has_summary_pdf=has_summary_pdf),
             )
         else:
             await send_long_text(query.message.chat, output_text)
             await query.message.reply_text(
                 "تحب تولّد حاجة تانية من نفس المحاضرة؟",
-                reply_markup=get_choices_keyboard(has_mcq_pdf=has_pdf),
+                reply_markup=get_choices_keyboard(has_mcq_pdf=has_mcq_pdf, has_summary_pdf=has_summary_pdf),
             )
 
     except Exception as e:
