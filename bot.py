@@ -34,11 +34,11 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 MODEL_NAME = "gemini-3.8-flash"
 
-# حدود النص: حد أعلى للمحاضرة المفردة وحد متوازن للمحاضرات المجمعة لحماية الرامات وتقليل ضغط التوليد
+# حدود النص: حد أعلى للمحاضرة المفردة وحد متوازن للمحاضرات المجمعة لحماية الرامات (256 MB)
 MAX_LECTURES_PER_SESSION = 8
 MAX_CHARS_SINGLE_LECTURE = 28000
-MAX_CHARS_PER_LECTURE = 6000
-MAX_COMBINED_CHARS = 34000
+MAX_CHARS_PER_LECTURE = 7500
+MAX_COMBINED_CHARS = 48000
 MAX_PREVIOUS_QUESTIONS_CONTEXT = 120
 
 FONT_URL = (
@@ -66,7 +66,7 @@ async def generate_with_retry(
     config: types.GenerateContentConfig,
     max_attempts: int = 3,
 ):
-    """ينفذ طلب التوليد مع إعادة المحاولة تلقائيًا عند ضغط السيرفر المؤقت (503 / ServerError)."""
+    """ينفذ طلب التوليد مع إعادة المحاولة تلقائيًا حتى 3 مرات عند ضغط السيرفر المؤقت (503 / ServerError)."""
     delays = [2.0, 4.5, 7.5]
     last_err = None
 
@@ -1194,6 +1194,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                     temperature=0.38 if (is_traps or is_links or is_more) else 0.3,
                     response_mime_type="application/json",
                 ),
+                max_attempts=3,
             )
             raw_out = response.text or ""
             new_mcq_items = parse_mcq_json(raw_out)
@@ -1278,6 +1279,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 system_instruction=MEDICAL_HIGH_YIELD_SYSTEM_PROMPT,
                 temperature=0.35 if is_more else 0.3,
             ),
+            max_attempts=3,
         )
 
         raw_output = response.text or ""
