@@ -32,7 +32,9 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 MODEL_NAME = "gemini-3.8-flash"
-MAX_CHARS = 45000
+MAX_LECTURES_PER_SESSION = 5
+MAX_CHARS_PER_LECTURE = 11000
+MAX_COMBINED_CHARS = 42000
 
 FONT_URL = (
     "https://github.com/google/fonts/raw/main/ofl/amiri/Amiri-Regular.ttf"
@@ -45,6 +47,7 @@ Golden Rule: Focus heavily on high-yield exam topics ("what gets tested"):
 - Core mechanisms, pharmacology/pathophysiology principles, and key clinical concepts.
 - Classic clinical vignettes, distinguishing presentations, and high-yield indications/contraindications/adverse effects.
 - Crucial comparisons, differential points, and critical exceptions.
+- When multiple lectures are provided, integrate concepts across lectures, highlight key contrasts/comparisons, and test high-yield connections.
 Strictly avoid trivial facts or low-yield filler details.
 Write ALL medical content, questions, choices, answers, summaries, explanations, and Anki cards strictly in clear, readable English.
 CRITICAL FORMATTING RULE:
@@ -163,15 +166,15 @@ def _output_pdf_bytes(pdf: FPDF) -> bytes:
             os.remove(tmp_path)
 
 
-def generate_mcq_pdf_bytes(lecture_title: str, mcq_items: list[dict]) -> bytes:
+def generate_mcq_pdf_bytes(session_label: str, mcq_items: list[dict]) -> bytes:
     pdf, font_family, usable_width = _create_base_pdf()
 
-    safe_title = sanitize_pdf_text(lecture_title) or "Lecture"
+    safe_label = sanitize_pdf_text(session_label) or "Lectures"
     _write_pdf_block(
         pdf,
         font_family,
         usable_width,
-        f"High-Yield MCQ ({len(mcq_items)} Questions) - {safe_title}",
+        f"High-Yield MCQ ({len(mcq_items)} Questions) - {safe_label}",
         font_size=16,
         line_h=8.5,
         space_after=5.0,
@@ -242,15 +245,15 @@ def generate_mcq_pdf_bytes(lecture_title: str, mcq_items: list[dict]) -> bytes:
     return _output_pdf_bytes(pdf)
 
 
-def generate_summary_pdf_bytes(lecture_title: str, summary_text: str) -> bytes:
+def generate_summary_pdf_bytes(session_label: str, summary_text: str) -> bytes:
     pdf, font_family, usable_width = _create_base_pdf()
 
-    safe_title = sanitize_pdf_text(lecture_title) or "Lecture"
+    safe_label = sanitize_pdf_text(session_label) or "Lectures"
     _write_pdf_block(
         pdf,
         font_family,
         usable_width,
-        f"High-Yield Summary - {safe_title}",
+        f"High-Yield Summary - {safe_label}",
         font_size=16,
         line_h=8.5,
         space_after=5.0,
@@ -302,35 +305,81 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
         text = (page.extract_text() or "").strip()
         if text:
             part = f"--- Page {idx} ---\n{text}"
-            if current_len + len(part) > MAX_CHARS:
-                remaining = MAX_CHARS - current_len
+            if current_len + len(part) > MAX_CHARS_PER_LECTURE:
+                remaining = MAX_CHARS_PER_LECTURE - current_len
                 if remaining > 200:
                     extracted_parts.append(part[:remaining])
-                extracted_parts.append("\n[Truncated to keep focus on high-yield content]")
+                extracted_parts.append("\n[Truncated per-lecture limit to keep memory safe]")
                 break
             extracted_parts.append(part)
             current_len += len(part)
     return "\n\n".join(extracted_parts)
 
 
-def build_mcq_json_prompt(lecture_text: str, traps_mode: bool = False) -> str:
+def get_session_lectures(context: ContextTypes.DEFAULT_TYPE) -> list[dict]:
+    lectures = context.user_data.get("lectures")
+    if not isinstance(lectures, list):
+        lectures = []
+        context.user_data["lectures"] = lectures
+    return lectures
+
+
+def build_combined_lecture_text(lectures: list[dict]) -> str:
+    combined_parts = []
+    total_len = 0
+    for idx, lec in enumerate(lectures, start=1):
+        title = lec.get("title", f"Lecture_{idx}")
+        txt = lec.get("text", "")
+        header = f"================ LECTURE {idx}: {title} ================\n"
+        block = header + txt
+        if total_len + len(block) > MAX_COMBINED_CHARS:
+            remaining = MAX_COMBINED_CHARS - total_len
+            if remaining > 300:
+                combined_parts.append(block[:remaining])
+            combined_parts.append("\n[Combined text capped to protect server memory]")
+            break
+        combined_parts.append(block)
+        total_len += len(block)
+    return "\n\n".join(combined_parts)
+
+
+def get_session_summary_label(lectures: list[dict]) -> str:
+    if not lectures:
+        return "Lectures"
+    if len(lectures) == 1:
+        return lectures[0].get("title", "Lecture")[:40]
+    return f"{len_words_clean(len(lectures))}" if False else f"{len(lectures)}_Combined_Lectures"
+
+
+def len_words_clean(n: int) -> str:
+    return f"{n}_Lectures"
+
+
+def build_mcq_json_prompt(combined_text: str, num_lectures: int, traps_mode: bool = False) -> str:
+    multi_rule = (
+        f"- You are given {num_lectures} lectures in this study session: distribute questions across ALL lectures AND include cross-lecture integration/comparison questions."
+        if num_lectures > 1
+        else "- Focus on the high-yield exam points in this lecture."
+    )
     if traps_mode:
-        focus_rules = """
-- Special Focus (Traps, Look-Alikes & Integrations): Build questions specifically loaded with exam traps, easily confused look-alike entities/drugs/conditions/mechanisms, and high-yield cross-lecture integrations from this lecture.
+        focus_rules = f"""
+{multi_rule}
+- Special Focus (Traps, Look-Alikes & Integrations): Build questions specifically loaded with exam traps, easily confused look-alike entities/drugs/conditions/mechanisms, and high-yield cross-topic/cross-lecture integrations.
 - Include subtle distractors that test directionality (increase vs. decrease, agonist vs. antagonist, exception vs. rule) and close look-alikes.
 - In `explanation`, clearly point out the exact exam trap and how to distinguish the correct answer from the main look-alike distractor.
 """
     else:
-        focus_rules = """
+        focus_rules = f"""
+{multi_rule}
 - Prioritize clinical vignettes, mechanisms, key distinctions, contraindications, adverse effects, and classic exam traps; avoid trivial details.
 - In `explanation`, provide a concise, high-yield explanation in English.
 """
 
     return f"""
-Generate high-yield English medical Multiple Choice Questions (MCQs) from this lecture.
+Generate high-yield English medical Multiple Choice Questions (MCQs) from the provided lecture material.
 Strict count rules:
 - Minimum is 30 questions; NEVER output fewer than 30 questions.
-- Maximum is open-ended depending on how rich and long the lecture is (generate more than 30 when the lecture covers substantial high-yield material).
+- Maximum is open-ended depending on how rich and long the provided lecture material is (generate more than 30 when covering multiple lectures or substantial high-yield material).
 - Write ALL questions, options, and explanations strictly in English.
 {focus_rules}
 - Each question must have exactly 4 options (list of 4 concise strings, each <= 85 characters for Telegram polls).
@@ -350,54 +399,63 @@ Return valid JSON only in this exact structure:
   ]
 }}
 
-Lecture content:
+Provided lectures:
 \"\"\"
-{lecture_text}
+{combined_text}
 \"\"\"
 """
 
 
-def build_mode_prompt(mode: str, lecture_text: str) -> str:
+def build_mode_prompt(mode: str, combined_text: str, num_lectures: int) -> str:
+    multi_note = (
+        f"Note: There are {num_lectures} lectures combined below. Cover all of them and explicitly link/compare high-yield concepts across lectures where relevant.\n"
+        if num_lectures > 1
+        else ""
+    )
     if mode == "saq":
-        task_instruction = """
-Generate high-yield Short Answer Questions (SAQs) in English based on the most testable points in this lecture.
+        task_instruction = f"""
+{multi_note}Generate high-yield Short Answer Questions (SAQs) in English based on the most testable points in the provided material.
 - Focus on mechanisms, comparisons, clinical reasoning, and key distinctions.
 - Provide a concise model answer in English right after each question.
 - Do NOT use asterisks (*), markdown headers (#), or markdown tables.
 """
     elif mode == "mix":
-        task_instruction = """
-Generate a focused high-yield Mix of English MCQs (vignettes/exam traps) and concise English SAQs from the most testable parts of this lecture.
+        task_instruction = f"""
+{multi_note}Generate a focused high-yield Mix of English MCQs (vignettes/exam traps) and concise English SAQs from the most testable parts of the provided material.
 - Include clear answers and brief high-yield explanations in English.
 - Do NOT use asterisks (*), markdown headers (#), or markdown tables. Present comparisons as clean structured lines instead of tables.
 """
     elif mode == "summary":
-        task_instruction = """
-Create a well-structured, high-yield English medical exam review summary of this lecture.
+        task_instruction = f"""
+{multi_note}Create a well-structured, high-yield English medical exam review summary of the provided material.
 - Organize with clear section titles and short, readable paragraphs or dash points (- ).
 - Highlight key mechanisms, comparisons, exceptions, and clinical/exam correlations. Remove fluff.
 - Do NOT use asterisks (*), markdown headers (#), or markdown tables.
 """
     elif mode == "anki":
-        task_instruction = """
-Create Anki flashcards in English ready for direct import using pipe ( | ) separation ONLY, one card per line, with NO numbering, intro, or extra commentary.
+        task_instruction = f"""
+{multi_note}Create Anki flashcards in English ready for direct import using pipe ( | ) separation ONLY, one card per line, with NO numbering, intro, or extra commentary.
 Format per line:
 Question or clinical vignette in English | Concise high-yield answer + key differentiator in English
 Focus strictly on high-yield exam points and avoid asterisks (*).
 """
     else:
-        task_instruction = "Summarize the high-yield exam points of this lecture in English without asterisks."
+        task_instruction = f"{multi_note}Summarize the high-yield exam points in English without asterisks."
 
     return f"""{task_instruction}
 
-Lecture content:
+Provided lectures:
 \"\"\"
-{lecture_text}
+{combined_text}
 \"\"\"
 """
 
 
-def get_choices_keyboard(has_mcq_pdf: bool = False, has_summary_pdf: bool = False) -> InlineKeyboardMarkup:
+def get_choices_keyboard(
+    has_mcq_pdf: bool = False,
+    has_summary_pdf: bool = False,
+    has_lectures: bool = False,
+) -> InlineKeyboardMarkup:
     keyboard = [
         [
             InlineKeyboardButton("MCQ Poll (High-Yield)", callback_data="mode_mcq"),
@@ -420,23 +478,48 @@ def get_choices_keyboard(has_mcq_pdf: bool = False, has_summary_pdf: bool = Fals
         keyboard.append(
             [InlineKeyboardButton("إعادة تحميل الملخص كملف PDF", callback_data="export_summary_pdf")]
         )
+    if has_lectures:
+        keyboard.append(
+            [
+                InlineKeyboardButton("قائمة المحاضرات المجمعة", callback_data="list_lectures"),
+                InlineKeyboardButton("مسح المحاضرات (Clear)", callback_data="clear_lectures"),
+            ]
+        )
     return InlineKeyboardMarkup(keyboard)
+
+
+def format_lectures_list_text(lectures: list[dict]) -> str:
+    if not lectures:
+        return "لا توجد محاضرات مخزنة حاليًا في الجلسة. أرسل ملف PDF للبدء."
+    lines = [f"المحاضرات المخزنة مؤقتًا في الجلسة ({len(lectures)}/{MAX_LECTURES_PER_SESSION}):"]
+    for i, lec in enumerate(lectures, start=1):
+        lines.append(f"{i}. {lec.get('title', 'Lecture')}")
+    lines.append("\nيمكنك إرسال محاضرة إضافية لضمها للمجموعة، أو اختيار أي زر لتوليد محتوى مجمع على الكل.")
+    return "\n".join(lines)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     welcome_text = (
         "أهلًا بك في بوت مذاكرة الطب (High-Yield - English Exams)\n\n"
-        "1. أرسل لي ملف المحاضرة بصيغة PDF.\n"
-        "2. سأحلل الملف وأعرض لك أزرار اختيار (كل الأسئلة والملخصات والـ Anki بالإنجليزية):\n"
+        f"1. أرسل ملف محاضرة بصيغة PDF (أو أرسل عدة محاضرات ورا بعض حتى {MAX_LECTURES_PER_SESSION} محاضرات لتجميعهم مؤقتًا في نفس الجلسة).\n"
+        "2. اختر من الأزرار لتوليد محتوى مجمّع أو لمحاضرة واحدة:\n"
         "   - MCQ Poll (أسئلة تفاعلية كـ Poll بحد أدنى 30 سؤال + إمكانية تحميلها PDF بخط واضح)\n"
         "   - MCQ Traps & Mix (أسئلة MCQ مليانة فخاخ امتحانات ومتشابهات وتجميعات)\n"
         "   - SAQ (أسئلة قصيرة بالإنجليزية مع إجابات نموذجية)\n"
         "   - Mix (مزيج MCQ + SAQ بتنسيق نظيف بدون نجوم)\n"
         "   - Summary (ملخص High-Yield بتنسيق جميل وملف PDF بخط واضح)\n"
         "   - Anki Ready (.txt) (ملف جاهز للاستيراد المباشر في Anki بالإنجليزية)\n\n"
-        "التركيز الأساسي دائمًا على الأجزاء المهمة وموضع السؤال لتوفير وقتك."
+        "التركيز الأساسي دائمًا على الأجزاء المهمة وموضع السؤال وتجميع الروابط بين المحاضرات."
     )
-    await update.message.reply_text(welcome_text)
+    lectures = get_session_lectures(context)
+    await update.message.reply_text(
+        welcome_text,
+        reply_markup=get_choices_keyboard(
+            has_mcq_pdf=bool(context.user_data.get("last_mcq_items")),
+            has_summary_pdf=bool(context.user_data.get("last_summary_pdf_bytes")),
+            has_lectures=bool(lectures),
+        ),
+    )
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -463,15 +546,26 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
 
-        context.user_data["lecture_text"] = lecture_text
-        context.user_data["lecture_title"] = os.path.splitext(file_name)[0][:40]
+        lectures = get_session_lectures(context)
+        if len(lectures) >= MAX_LECTURES_PER_SESSION:
+            # استبدال أقدم محاضرة للحفاظ على الرامات ضمن الحدود الآمنة
+            removed = lectures.pop(0)
+            logger.info("Removed oldest lecture %s to stay within limit", removed.get("title"))
+
+        clean_title = os.path.splitext(file_name)[0][:40]
+        lectures.append({"title": clean_title, "text": lecture_text})
         context.user_data.pop("last_mcq_items", None)
         context.user_data.pop("last_summary_pdf_bytes", None)
 
         await status_msg.edit_text(
-            f"تم تحليل المحاضرة: {file_name}\n"
-            "عايز تعمل إيه دلوقتي؟ اختر من الأزرار التالية:",
-            reply_markup=get_choices_keyboard(has_mcq_pdf=False, has_summary_pdf=False),
+            f"تمت إضافة المحاضرة: {clean_title}\n"
+            f"إجمالي المحاضرات المجمعة حاليًا: {len(lectures)}/{MAX_LECTURES_PER_SESSION}\n"
+            "تقدر تبعت محاضرة كمان لضمها، أو تختار من الأزرار دلوقتي:",
+            reply_markup=get_choices_keyboard(
+                has_mcq_pdf=False,
+                has_summary_pdf=False,
+                has_lectures=True,
+            ),
         )
     except Exception as e:
         logger.error("Error handling document: %s", e)
@@ -527,9 +621,29 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
 
     action = query.data
-    lecture_title = context.user_data.get("lecture_title", "lecture")
+    lectures = get_session_lectures(context)
     has_mcq_pdf = bool(context.user_data.get("last_mcq_items"))
     has_summary_pdf = bool(context.user_data.get("last_summary_pdf_bytes"))
+    has_lectures = bool(lectures)
+    session_label = get_session_summary_label(lectures)
+
+    if action == "list_lectures":
+        await query.message.reply_text(
+            format_lectures_list_text(lectures),
+            reply_markup=get_choices_keyboard(
+                has_mcq_pdf=has_mcq_pdf,
+                has_summary_pdf=has_summary_pdf,
+                has_lectures=has_lectures,
+            ),
+        )
+        return
+
+    if action == "clear_lectures":
+        context.user_data.clear()
+        await query.message.reply_text(
+            "تم مسح جميع المحاضرات والملفات المؤقتة من الجلسة. أرسل ملفات PDF جديدة للبدء."
+        )
+        return
 
     if action == "export_mcq_pdf":
         mcq_items = context.user_data.get("last_mcq_items")
@@ -539,15 +653,19 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         pdf_wait = await query.message.reply_text("جاري تجهيز ملف الـ PDF للأسئلة بخط واضح...")
         try:
-            pdf_bytes = await asyncio.to_thread(generate_mcq_pdf_bytes, lecture_title, mcq_items)
+            pdf_bytes = await asyncio.to_thread(generate_mcq_pdf_bytes, session_label, mcq_items)
             pdf_io = io.BytesIO(pdf_bytes)
-            pdf_io.name = f"{lecture_title}_MCQ.pdf"
+            pdf_io.name = f"{session_label}_MCQ.pdf"
             await pdf_wait.delete()
             await query.message.reply_document(
                 document=pdf_io,
-                filename=f"{lecture_title}_MCQ.pdf",
+                filename=f"{session_label}_MCQ.pdf",
                 caption=f"High-Yield MCQ PDF ({len(mcq_items)} questions with answers & explanations).",
-                reply_markup=get_choices_keyboard(has_mcq_pdf=True, has_summary_pdf=has_summary_pdf),
+                reply_markup=get_choices_keyboard(
+                    has_mcq_pdf=True,
+                    has_summary_pdf=has_summary_pdf,
+                    has_lectures=has_lectures,
+                ),
             )
         except Exception as e:
             logger.error("Error generating MCQ PDF: %s", e)
@@ -561,27 +679,34 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
         pdf_io = io.BytesIO(summary_pdf_bytes)
-        pdf_io.name = f"{lecture_title}_Summary.pdf"
+        pdf_io.name = f"{session_label}_Summary.pdf"
         await query.message.reply_document(
             document=pdf_io,
-            filename=f"{lecture_title}_Summary.pdf",
+            filename=f"{session_label}_Summary.pdf",
             caption="High-Yield Summary PDF.",
-            reply_markup=get_choices_keyboard(has_mcq_pdf=has_mcq_pdf, has_summary_pdf=True),
+            reply_markup=get_choices_keyboard(
+                has_mcq_pdf=has_mcq_pdf,
+                has_summary_pdf=True,
+                has_lectures=has_lectures,
+            ),
         )
         return
 
-    lecture_text = context.user_data.get("lecture_text")
-    if not lecture_text:
-        await query.message.reply_text("من فضلك أرسل ملف PDF للمحاضرة أولًا.")
+    if not lectures:
+        await query.message.reply_text("من فضلك أرسل ملف PDF لمحاضرة واحدة على الأقل أولًا.")
         return
 
+    combined_text = build_combined_lecture_text(lectures)
+    num_lectures = len(lectures)
     mode = action.replace("mode_", "")
-    wait_msg = await query.message.reply_text("جاري إعداد المحتوى الطبي المركز (High-Yield English)...")
+    wait_msg = await query.message.reply_text(
+        f"جاري إعداد المحتوى الطبي المركز ({num_lectures} محاضرة)..."
+    )
 
     try:
         if mode in ("mcq", "traps"):
             is_traps = mode == "traps"
-            prompt = build_mcq_json_prompt(lecture_text, traps_mode=is_traps)
+            prompt = build_mcq_json_prompt(combined_text, num_lectures=num_lectures, traps_mode=is_traps)
             response = await asyncio.to_thread(
                 client.models.generate_content,
                 model=MODEL_NAME,
@@ -601,7 +726,9 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             context.user_data["last_mcq_items"] = mcq_items
             label = "MCQ Traps & Mix" if is_traps else "MCQ"
-            await wait_msg.edit_text(f"تم توليد {len(mcq_items)} سؤال {label} بالإنجليزية. جاري إرسال الاستفتاءات...")
+            await wait_msg.edit_text(
+                f"تم توليد {len(mcq_items)} سؤال {label} من {num_lectures} محاضرة. جاري إرسال الاستفتاءات..."
+            )
 
             for idx, item in enumerate(mcq_items, start=1):
                 await query.message.reply_poll(
@@ -615,12 +742,16 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             await query.message.reply_text(
                 f"تم إرسال {len(mcq_items)} سؤال ({label}) كـ Poll بالإنجليزية. الشرح التفصيلي والفخاخ موجودة داخل ملف الـ PDF.\n"
-                "تحب تحمّل الأسئلة دي كملف PDF أو تختار حاجة تانية من نفس المحاضرة؟",
-                reply_markup=get_choices_keyboard(has_mcq_pdf=True, has_summary_pdf=has_summary_pdf),
+                "تحب تحمّل الأسئلة دي كملف PDF أو تختار حاجة تانية؟",
+                reply_markup=get_choices_keyboard(
+                    has_mcq_pdf=True,
+                    has_summary_pdf=has_summary_pdf,
+                    has_lectures=True,
+                ),
             )
             return
 
-        prompt = build_mode_prompt(mode, lecture_text)
+        prompt = build_mode_prompt(mode, combined_text, num_lectures=num_lectures)
         response = await asyncio.to_thread(
             client.models.generate_content,
             model=MODEL_NAME,
@@ -640,17 +771,21 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if mode == "summary":
             summary_pdf_bytes = await asyncio.to_thread(
-                generate_summary_pdf_bytes, lecture_title, output_text
+                generate_summary_pdf_bytes, session_label, output_text
             )
             context.user_data["last_summary_pdf_bytes"] = summary_pdf_bytes
             pdf_io = io.BytesIO(summary_pdf_bytes)
-            pdf_io.name = f"{lecture_title}_Summary.pdf"
+            pdf_io.name = f"{session_label}_Summary.pdf"
 
             await query.message.reply_document(
                 document=pdf_io,
-                filename=f"{lecture_title}_Summary.pdf",
-                caption="ملخص High-Yield منسق بصيغة PDF بخط واضح ومريح للقراءة. تحب تعمل حاجة تانية؟",
-                reply_markup=get_choices_keyboard(has_mcq_pdf=has_mcq_pdf, has_summary_pdf=True),
+                filename=f"{session_label}_Summary.pdf",
+                caption=f"ملخص High-Yield مجمع لـ {num_lectures} محاضرة بصيغة PDF بخط واضح. تحب تعمل حاجة تانية؟",
+                reply_markup=get_choices_keyboard(
+                    has_mcq_pdf=has_mcq_pdf,
+                    has_summary_pdf=True,
+                    has_lectures=True,
+                ),
             )
         elif mode == "anki":
             cleaned_lines = []
@@ -663,19 +798,27 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             anki_content = "\n".join(cleaned_lines) if cleaned_lines else output_text
             anki_bytes = io.BytesIO(anki_content.encode("utf-8"))
-            anki_bytes.name = f"{lecture_title}_anki.txt"
+            anki_bytes.name = f"{session_label}_anki.txt"
 
             await query.message.reply_document(
                 document=anki_bytes,
-                filename=f"{lecture_title}_anki.txt",
-                caption="Anki deck ready for direct import (Separator: |). تحب تعمل حاجة تانية من نفس المحاضرة؟",
-                reply_markup=get_choices_keyboard(has_mcq_pdf=has_mcq_pdf, has_summary_pdf=has_summary_pdf),
+                filename=f"{session_label}_anki.txt",
+                caption="Anki deck ready for direct import (Separator: |). تحب تعمل حاجة تانية؟",
+                reply_markup=get_choices_keyboard(
+                    has_mcq_pdf=has_mcq_pdf,
+                    has_summary_pdf=has_summary_pdf,
+                    has_lectures=True,
+                ),
             )
         else:
             await send_long_text(query.message.chat, output_text)
             await query.message.reply_text(
-                "تحب تولّد حاجة تانية من نفس المحاضرة؟",
-                reply_markup=get_choices_keyboard(has_mcq_pdf=has_mcq_pdf, has_summary_pdf=has_summary_pdf),
+                "تحب تولّد حاجة تانية من المحاضرات المجمعة؟",
+                reply_markup=get_choices_keyboard(
+                    has_mcq_pdf=has_mcq_pdf,
+                    has_summary_pdf=has_summary_pdf,
+                    has_lectures=True,
+                ),
             )
 
     except Exception as e:
